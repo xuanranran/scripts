@@ -41,7 +41,7 @@ machine_choose () {
             ;;
         3)
             echo -e '\e[92m已选择X86\e[0m'
-            machine_id=3 && repo_id='OpenWRT_x86_x64'
+            machine_id=3 && repo_id='OpenWRT-X86_64'
             ;;
         *)
             echo -e '\e[91m非法输入,请输入数字[0-3]\e[0m' && machine_choose
@@ -51,7 +51,7 @@ machine_choose () {
 #版本选择
 version_choose () {
     echo -e '\e[92m根据数字选择固件版本或退出\e[0m'
-    echo -e '0 --- Exit退出\n1 --- Docker_容器版\n2 --- Formal_正式版\n3 --- Stable_稳定版\n4 --- Lite_乞丐版'
+    echo -e '0 --- Exit退出\n1 --- Docker_容器版\n2 --- Formal_正式版\n3 --- Stable_稳定版\n4 --- Lite_乞丐版\n5 --- Docker_容器乞丐版\n6 --- Docker_容器无线乞丐版'
     read -p "请输入数字[0-4],回车确认 " version_num
     case $version_num in
         0)
@@ -69,8 +69,14 @@ version_choose () {
         4)
             echo -e '\e[92m已选择Lite_乞丐版\e[0m' && version_num=beggar
             ;;
+        5)
+            echo -e '\e[92m已选择Docker_容器乞丐版\e[0m' && version_num=bod
+            ;;
+        6)
+            echo -e '\e[92m已选择Docker_容器无线乞丐版\e[0m' && version_num=wcf
+            ;;
         *)
-            echo -e '\e[91m非法输入,请输入数字[0-4]\e[0m' && version_choose
+            echo -e '\e[91m非法输入,请输入数字[0-6]\e[0m' && version_choose
             ;;
     esac
 }
@@ -115,7 +121,7 @@ repo_set () {
             ;;
     esac
     proxy_url=https://ghproxy.com
-    repo_url=https://github.com/DHDAXCW/${repo_id}/releases
+    repo_url=https://github.com/xuanranran/${repo_id}/releases
     firmware_url=${version_num}-${firmware_id}
 }
 #寻找固件
