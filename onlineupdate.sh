@@ -52,7 +52,7 @@ machine_choose () {
 version_choose () {
     echo -e '\e[92m根据数字选择固件版本或退出\e[0m'
     echo -e '0 --- Exit退出\n1 --- Docker_容器版\n2 --- Formal_正式版\n3 --- Stable_稳定版\n4 --- Lite_乞丐版\n5 --- Docker_容器乞丐版\n6 --- Docker_容器无线乞丐版\n7 --- Test_自测版'
-    read -p "请输入数字[0-4],回车确认 " version_num
+    read -p "请输入数字[0-7],回车确认 " version_num
     case $version_num in
         0)
             echo -e '\e[91m退出脚本，升级结束\e[0m' && exit;
