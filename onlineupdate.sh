@@ -41,7 +41,7 @@ machine_choose () {
             ;;
         3)
             echo -e '\e[92m已选择X86\e[0m'
-            machine_id= && repo_id='OpenWRT-X86_64'
+            machine_id=3 && repo_id='OpenWRT-X86_64'
             ;;
         *)
             echo -e '\e[91m非法输入,请输入数字[0-3]\e[0m' && machine_choose
@@ -81,7 +81,6 @@ version_choose () {
 format_choose () {
         echo -e '\e[92m根据数字选择固件格式或退出\e[0m'
         echo -e '0 --- 退出\n1 --- Ext4\n2 --- Squashfs'
-    if [ $machine_num == 2 ];then
     if [ $machine_num == 3 ];then
         echo -e '\e[91mX86固定使用Squashfs格式\e[0m'
         break
@@ -198,7 +197,7 @@ version_confirm () {
 }
 #解压固件
 unzip_fireware () {
-    echo -e '\e[92m开始解压固件\e[0m' && gzip -cd ${firmware_url}.gz > ${img_path}/${firmware_url}
+    echo -e '\e[92m开始解压固件\e[0m' && gunzip -cd ${firmware_url}.gz > ${img_path}/${firmware_url}
     if [ -f ${img_path}/${firmware_url} ]; then
         echo -e '\e[92m已解压出升级文件\e[0m' && firmware_check
     else
@@ -211,7 +210,7 @@ update_system () {
     read -r -p "是否保存配置? [Y/N]确认 [E]退出 " skip
     case $skip in
         [yY][eE][sS]|[yY])
-            echo -e '\e[92m已选择保存配置\e[0m' && sysupgrade -F ${firmware_url}
+            echo -e '\e[92m已选择保存配置\e[0m' && sysupgrade -F -v ${firmware_url}
             ;;
         [nN][oO]|[nN])
             echo -e '\e[91m已选择不保存配置\e[0m' && sysupgrade -F -n ${firmware_url}
