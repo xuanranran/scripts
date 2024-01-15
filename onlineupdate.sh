@@ -41,7 +41,7 @@ machine_choose () {
             ;;
         3)
             echo -e '\e[92m已选择X86\e[0m'
-            machine_id=3 && repo_id='OpenWRT-X86_64'
+            machine_id= && repo_id='OpenWRT-X86_64'
             ;;
         *)
             echo -e '\e[91m非法输入,请输入数字[0-3]\e[0m' && machine_choose
