@@ -87,8 +87,7 @@ format_choose () {
         echo -e '0 --- 退出\n1 --- Ext4\n2 --- Squashfs'
     if [ $machine_num == 3 ];then
         echo -e '\e[91mX86固定使用Squashfs格式\e[0m'
-        break
-    if [ $machine_num == 4 ];then
+       [ $machine_num == 4 ];then
         echo -e '\e[91mX86-6.6Kernel固定使用Squashfs格式\e[0m'
         break
     else
