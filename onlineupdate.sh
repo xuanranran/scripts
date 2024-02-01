@@ -85,7 +85,7 @@ version_choose () {
 format_choose () {
         echo -e '\e[92m根据数字选择固件格式或退出\e[0m'
         echo -e '0 --- 退出\n1 --- Ext4\n2 --- Squashfs'
-    if [ $machine_num == 3\4 ];then
+    if [ $machine_num == 3  4 ];then
         echo -e '\e[91mX86固定使用Squashfs格式\e[0m'
         break
     else
