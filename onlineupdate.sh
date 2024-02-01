@@ -25,7 +25,7 @@ hd_check () {
 #设备选择
 machine_choose () {
     echo -e '\e[92m输入对应数字选择设备或退出\e[0m'
-    echo -e '0 --- 退出\n1 --- R4S\n2 --- DN2\n3 --- X86\n3 --- X86-Kernel6.6'
+    echo -e '0 --- 退出\n1 --- R4S\n2 --- DN2\n3 --- X86\n4 --- X86-Kernel6.6'
     read -p "请输入数字[0-4],回车确认 " machine_num
     case $machine_num in
         0)
