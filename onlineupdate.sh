@@ -25,7 +25,7 @@ hd_check () {
 #设备选择
 machine_choose () {
     echo -e '\e[92m输入对应数字选择设备或退出\e[0m'
-    echo -e '0 --- 退出\n1 --- R4S\n2 --- DN2\n3 --- X86-6.1内核'
+    echo -e '0 --- 退出\n1 --- R4S\n2 --- DN2\n3 --- X86'
     read -p "请输入数字[0-3],回车确认 " machine_num
     case $machine_num in
         0)
@@ -40,7 +40,7 @@ machine_choose () {
             machine_id=1 && repo_id='DoorNet2'
             ;;
         3)
-            echo -e '\e[92m已选择X86-6.1内核\e[0m'
+            echo -e '\e[92m已选择X86\e[0m'
             machine_id=3 && repo_id='OpenWRT-X86_64'
             ;;
         *)
