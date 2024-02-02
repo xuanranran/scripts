@@ -25,8 +25,8 @@ hd_check () {
 #设备选择
 machine_choose () {
     echo -e '\e[92m输入对应数字选择设备或退出\e[0m'
-    echo -e '0 --- 退出\n1 --- R4S\n2 --- DN2\n3 --- X86_6.1内核\n4 --- X86_6.6内核'
-    read -p "请输入数字[0-4],回车确认 " machine_num
+    echo -e '0 --- 退出\n1 --- R4S\n2 --- DN2\n3 --- X86_6.1内核'
+    read -p "请输入数字[0-3],回车确认 " machine_num
     case $machine_num in
         0)
             echo -e '\e[91m退出脚本，升级结束\e[0m' && exit;
@@ -43,12 +43,8 @@ machine_choose () {
             echo -e '\e[92m已选择X86_6.1内核\e[0m'
             machine_id=3 && repo_id='OpenWRT-X86_64'
             ;;
-        4)
-            echo -e '\e[92m已选择X86_6.6内核\e[0m'
-            machine_id=4 && repo_id='OpenWRT-X86_64'
-            ;;
         *)
-            echo -e '\e[91m非法输入,请输入数字[0-4]\e[0m' && machine_choose
+            echo -e '\e[91m非法输入,请输入数字[0-3]\e[0m' && machine_choose
             ;;
     esac
 }
@@ -118,9 +114,6 @@ repo_set () {
             firmware_id="embedfire_doornet2-${format}-sysupgrade.img"
             ;;
         3)
-            firmware_id="x86-64-squashfs-efi.img"
-            ;;
-        4)
             firmware_id="x86-64-squashfs-efi.img"
             ;;
     esac
