@@ -89,7 +89,6 @@ format_choose () {
         echo -e '\e[91mX86固定使用Squashfs格式\e[0m'
         break
     else
-    fi
     if [ $machine_num == 4 ];then
         echo -e '\e[91mX86固定使用Squashfs格式\e[0m'
         break
