@@ -213,7 +213,7 @@ update_system () {
             echo -e '\e[92m已选择保存配置\e[0m' && sysupgrade -F -v ${firmware_url}
             ;;
         [nN][oO]|[nN])
-            echo -e '\e[91m已选择不保存配置\e[0m' && sysupgrade -F -n ${firmware_url}
+            echo -e '\e[91m已选择不保存配置\e[0m' && sysupgrade -F -v -n ${firmware_url}
             ;;
         [eE][xX][iI][tT]|[eE])
             echo -e '\e[91m取消升级\e[0m' && clean_up && exit;
