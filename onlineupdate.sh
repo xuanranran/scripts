@@ -26,7 +26,7 @@ hd_check () {
 machine_choose () {
     echo -e '\e[92m输入对应数字选择设备或退出\e[0m'
     echo -e '0 --- 退出\n1 --- R4S\n2 --- DN2\n3 --- X86_6.1内核\n4 --- X86_6.6内核'
-    read -p "请输入数字[0-3],回车确认 " machine_num
+    read -p "请输入数字[0-4],回车确认 " machine_num
     case $machine_num in
         0)
             echo -e '\e[91m退出脚本，升级结束\e[0m' && exit;
@@ -48,7 +48,7 @@ machine_choose () {
             machine_id=4 && repo_id='OpenWRT-X86_64'
             ;;
         *)
-            echo -e '\e[91m非法输入,请输入数字[0-3]\e[0m' && machine_choose
+            echo -e '\e[91m非法输入,请输入数字[0-4]\e[0m' && machine_choose
             ;;
     esac
 }
