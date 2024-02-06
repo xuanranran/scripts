@@ -25,7 +25,7 @@ hd_check () {
 #设备选择
 machine_choose () {
     echo -e '\e[92m输入对应数字选择设备或退出\e[0m'
-    echo -e '0 --- 退出\n1 --- R4S\n2 --- DN2\n3 --- X86'
+    echo -e '0 --- 退出\n1 --- R4S\n2 --- DN2\n3 --- X86_6.1内核\n4 --- X86_6.6内核'
     read -p "请输入数字[0-3],回车确认 " machine_num
     case $machine_num in
         0)
@@ -40,8 +40,12 @@ machine_choose () {
             machine_id=1 && repo_id='DoorNet2'
             ;;
         3)
-            echo -e '\e[92m已选择X86\e[0m'
+            echo -e '\e[92m已选择X86_6.1内核\e[0m'
             machine_id=3 && repo_id='OpenWRT-X86_64'
+            ;;
+        4)
+            echo -e '\e[92m已选择X86_6.6内核\e[0m'
+            machine_id=4 && repo_id='OpenWRT-X86_64'
             ;;
         *)
             echo -e '\e[91m非法输入,请输入数字[0-3]\e[0m' && machine_choose
@@ -81,7 +85,7 @@ version_choose () {
 format_choose () {
         echo -e '\e[92m根据数字选择固件格式或退出\e[0m'
         echo -e '0 --- 退出\n1 --- Ext4\n2 --- Squashfs'
-    if [ $machine_num == 3 ];then
+    if [ "$machine_num" == "3" ] || [ "$machine_num" == "4" ];then
         echo -e '\e[91mX86固定使用Squashfs格式\e[0m'
         break
     else
