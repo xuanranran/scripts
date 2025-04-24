@@ -10,11 +10,11 @@ IMAGE_PATH_IMG="$TMP_DIR/$IMAGE_FILENAME_IMG"                              # 解
 THRESHOLD_KIB=1887437                                                      # 保留数据的空间阈值 (1.8 GiB in KiB)
 
 # --- 退出脚本时清理临时文件 ---
-cleanup() {
-  echo "信息：正在清理临时文件..."
-  rm -f "$IMAGE_PATH_GZ" "$IMAGE_PATH_IMG" # 清理压缩包和解压后的文件
-}
-trap cleanup EXIT
+# cleanup() {
+  # echo "信息：正在清理临时文件..."
+  # rm -f "$IMAGE_PATH_GZ" "$IMAGE_PATH_IMG" # 清理压缩包和解压后的文件
+# }
+# trap cleanup EXIT
 
 # --- 设置：如果任何命令失败则立即退出 ---
 # 在依赖项安装步骤中会临时禁用此设置
@@ -144,7 +144,16 @@ echo "信息：所有必需的依赖项 (wget, jq, gunzip, awk) 都已找到。"
 # 启用严格错误检查
 set -e
 
-# --- 2. 获取最新 Release 信息 --- (原来的第 3 步)
+# --- 2. 临时增大 /tmp 分区 ---
+# *** 重新加入此步骤 ***
+echo "信息：尝试临时将 /tmp 重新挂载为更大内存（RAM 的 100%）..."
+echo "      注意：此更改仅在本次运行期间有效，重启后失效。"
+mount -t tmpfs -o remount,size=100% tmpfs /tmp || echo "警告：重新挂载 /tmp 可能失败或不受支持，继续执行..."
+echo "信息：/tmp 当前挂载信息和大小:"
+mount | grep " /tmp " || echo "信息：/tmp 可能未显示在 mount 输出中，或不是独立挂载点。"
+df -h /tmp
+
+# --- 3. 获取最新 Release 信息 ---
 echo "信息：正在从 GitHub 仓库 '$REPO' 获取最新版本信息..."
 API_URL="https://api.github.com/repos/$REPO/releases/latest"
 RELEASE_INFO=$(wget -qO- --no-check-certificate "$API_URL")
@@ -154,7 +163,7 @@ if [ -z "$RELEASE_INFO" ]; then
     exit 1
 fi
 
-# --- 3. 查找固件文件 URL --- (原来的第 4 步)
+# --- 4. 查找固件文件 URL ---
 echo "信息：正在查找压缩固件 '$IMAGE_FILENAME_GZ' 的下载链接..."
 IMAGE_URL=$(echo "$RELEASE_INFO" | jq -r --arg NAME "$IMAGE_FILENAME_GZ" '.assets[] | select(.name==$NAME) | .browser_download_url')
 RELEASE_TAG=$(echo "$RELEASE_INFO" | jq -r '.tag_name // "未知标签"')
@@ -167,7 +176,7 @@ fi
 echo "信息：找到最新版本 '$RELEASE_TAG'"
 echo "信息：压缩固件下载链接: $IMAGE_URL"
 
-# --- 4. 下载压缩固件 --- (原来的第 5 步)
+# --- 5. 下载压缩固件 ---
 echo "---------------------------------------------------------------------"
 echo "已找到固件文件："
 echo "  版本标签: $RELEASE_TAG"
@@ -185,9 +194,8 @@ echo "信息：正在下载压缩固件 '$IMAGE_FILENAME_GZ' 到 '$IMAGE_PATH_GZ
 wget --progress=bar:force --no-check-certificate -O "$IMAGE_PATH_GZ" "$IMAGE_URL"
 echo "信息：压缩固件下载完成。"
 
-# --- 5. 解压固件 --- (原来的第 6 步)
+# --- 6. 解压固件 (需要 gunzip 命令) ---
 echo "信息：正在解压固件 '$IMAGE_PATH_GZ' -> '$IMAGE_PATH_IMG' ..."
-# 注意：如果默认 /tmp 空间不足，此步可能失败
 gunzip "$IMAGE_PATH_GZ"
 
 if [ ! -f "$IMAGE_PATH_IMG" ]; then
@@ -199,11 +207,11 @@ ls -lh "$IMAGE_PATH_IMG"
 echo "警告：已跳过文件完整性校验！请自行承担风险。"
 
 
-# --- 6. 检查空间并确定升级选项 --- (原来的第 7 步)
+# --- 7. 检查空间并确定升级选项 ---
 echo "信息：正在检查 /tmp 可用空间以确定升级选项..."
 AVAILABLE_KIB=$(df -k /tmp | awk 'NR==2 {print $4}')
 
-SYSUPGRADE_ARGS="" # sysupgrade 命令参数，默认为空（保留配置）
+SYSUPGRADE_ARGS="" # sysupgrade 保留/不保留数据的参数 (-n 或空)
 KEEP_DATA_ALLOWED=1 # 标记是否允许保留数据
 
 if [ -z "$AVAILABLE_KIB" ] || ! [[ "$AVAILABLE_KIB" =~ ^[0-9]+$ ]]; then
@@ -230,8 +238,7 @@ if [ "$KEEP_DATA_ALLOWED" -eq 1 ]; then
     fi
 fi
 
-# --- 7. 询问可选参数并执行升级 --- (原来的第 8 步)
-# 设置关于数据保留的基本提示信息
+# --- 8. 询问可选参数并执行升级 ---
 UPGRADE_INFO="将使用以下 *解压后* 的固件文件进行升级：\n$IMAGE_PATH_IMG\n"
 if [ "$SYSUPGRADE_ARGS" == "-n" ]; then
     UPGRADE_INFO="${UPGRADE_INFO}\n注意：升级将不会保留现有的配置数据！(使用 -n 选项)\n"
@@ -270,7 +277,6 @@ else
 fi
 
 # --- 最终确认与执行 ---
-# 显示最终的升级信息摘要
 echo "---------------------------------------------------------------------"
 echo -e "警告：即将开始系统升级！"
 echo -e "$UPGRADE_INFO" # 显示包含 -F 和 -v 状态的最终信息
@@ -280,7 +286,6 @@ if [ -z "$SYSUPGRADE_ARGS" ]; then # 只有在尝试保留配置时才强烈建�
     echo "建议提前备份重要数据。"
 fi
 echo "---------------------------------------------------------------------"
-# Final confirmation
 read -p "确认要开始执行 sysupgrade 升级吗？ (y/N): " confirm_upgrade
 
 if [[ "$confirm_upgrade" =~ ^[Yy]$ ]]; then
