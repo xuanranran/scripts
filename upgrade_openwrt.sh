@@ -144,15 +144,7 @@ echo "信息：所有必需的依赖项 (wget, jq, gunzip, awk) 都已找到。"
 # 启用严格错误检查
 set -e
 
-# --- 2. 临时增大 /tmp 分区 ---
-echo "信息：尝试临时将 /tmp 重新挂载为更大内存（RAM 的 100%）..."
-echo "      注意：此更改仅在本次运行期间有效，重启后失效。"
-mount -t tmpfs -o remount,size=100% tmpfs /tmp || echo "警告：重新挂载 /tmp 可能失败或不受支持，继续执行..."
-echo "信息：/tmp 当前挂载信息和大小:"
-# mount | grep " /tmp " || echo "信息：/tmp 可能未显示在 mount 输出中，或不是独立挂载点。"
-df -h /tmp
-
-# --- 3. 获取最新 Release 信息 ---
+# --- 2. 获取最新 Release 信息 --- (原来的第 3 步)
 echo "信息：正在从 GitHub 仓库 '$REPO' 获取最新版本信息..."
 API_URL="https://api.github.com/repos/$REPO/releases/latest"
 RELEASE_INFO=$(wget -qO- --no-check-certificate "$API_URL")
@@ -162,7 +154,7 @@ if [ -z "$RELEASE_INFO" ]; then
     exit 1
 fi
 
-# --- 4. 查找固件文件 URL ---
+# --- 3. 查找固件文件 URL --- (原来的第 4 步)
 echo "信息：正在查找压缩固件 '$IMAGE_FILENAME_GZ' 的下载链接..."
 IMAGE_URL=$(echo "$RELEASE_INFO" | jq -r --arg NAME "$IMAGE_FILENAME_GZ" '.assets[] | select(.name==$NAME) | .browser_download_url')
 RELEASE_TAG=$(echo "$RELEASE_INFO" | jq -r '.tag_name // "未知标签"')
@@ -175,7 +167,7 @@ fi
 echo "信息：找到最新版本 '$RELEASE_TAG'"
 echo "信息：压缩固件下载链接: $IMAGE_URL"
 
-# --- 5. 下载压缩固件 ---
+# --- 4. 下载压缩固件 --- (原来的第 5 步)
 echo "---------------------------------------------------------------------"
 echo "已找到固件文件："
 echo "  版本标签: $RELEASE_TAG"
@@ -193,8 +185,9 @@ echo "信息：正在下载压缩固件 '$IMAGE_FILENAME_GZ' 到 '$IMAGE_PATH_GZ
 wget --progress=bar:force --no-check-certificate -O "$IMAGE_PATH_GZ" "$IMAGE_URL"
 echo "信息：压缩固件下载完成。"
 
-# --- 6. 解压固件 (需要 gunzip 命令) ---
+# --- 5. 解压固件 --- (原来的第 6 步)
 echo "信息：正在解压固件 '$IMAGE_PATH_GZ' -> '$IMAGE_PATH_IMG' ..."
+# 注意：如果默认 /tmp 空间不足，此步可能失败
 gunzip "$IMAGE_PATH_GZ"
 
 if [ ! -f "$IMAGE_PATH_IMG" ]; then
@@ -206,11 +199,11 @@ ls -lh "$IMAGE_PATH_IMG"
 echo "警告：已跳过文件完整性校验！请自行承担风险。"
 
 
-# --- 7. 检查空间并确定升级选项 ---
+# --- 6. 检查空间并确定升级选项 --- (原来的第 7 步)
 echo "信息：正在检查 /tmp 可用空间以确定升级选项..."
 AVAILABLE_KIB=$(df -k /tmp | awk 'NR==2 {print $4}')
 
-SYSUPGRADE_ARGS="" # sysupgrade 保留/不保留数据的参数 (-n 或空)
+SYSUPGRADE_ARGS="" # sysupgrade 命令参数，默认为空（保留配置）
 KEEP_DATA_ALLOWED=1 # 标记是否允许保留数据
 
 if [ -z "$AVAILABLE_KIB" ] || ! [[ "$AVAILABLE_KIB" =~ ^[0-9]+$ ]]; then
@@ -237,7 +230,7 @@ if [ "$KEEP_DATA_ALLOWED" -eq 1 ]; then
     fi
 fi
 
-# --- 8. 询问可选参数并执行升级 ---
+# --- 7. 询问可选参数并执行升级 --- (原来的第 8 步)
 # 设置关于数据保留的基本提示信息
 UPGRADE_INFO="将使用以下 *解压后* 的固件文件进行升级：\n$IMAGE_PATH_IMG\n"
 if [ "$SYSUPGRADE_ARGS" == "-n" ]; then
@@ -258,7 +251,7 @@ read -p "是否要在本次升级中使用强制 '-F' 选项？ (y/N): " confirm
 if [[ "$confirm_force" =~ ^[Yy]$ ]]; then
     echo "信息：用户选择使用强制 '-F' 选项进行升级。"
     FORCE_FLAG="-F"
-    UPGRADE_INFO="${UPGRADE_INFO}\n*** 本次升级将强制执行 (-F 选项)！ ***\n"
+    UPGRADE_INFO="${UPGRADE_INFO}\n*** 本次升级将强制执行 (-F 选项)！ ***\n" # 在最终摘要中加入-F提示
 else
     echo "信息：本次升级将不使用强制 '-F' 选项。"
     FORCE_FLAG=""
@@ -310,7 +303,7 @@ if [[ "$confirm_upgrade" =~ ^[Yy]$ ]]; then
     fi
     echo "$MSG_DESC"
 
-    # *** 修改点：在 sysupgrade 命令中加入 $VERBOSE_FLAG ***
+    # 执行命令
     sysupgrade $FORCE_FLAG $VERBOSE_FLAG $SYSUPGRADE_ARGS "$IMAGE_PATH_IMG"
 
     echo "信息：sysupgrade 命令已执行。如果成功，系统将会重启。"
