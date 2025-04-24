@@ -1,13 +1,12 @@
 #!/bin/bash
 
 # --- 配置 ---
-REPO="xuanranran/OpenWRT-X86_64"
-IMAGE_FILENAME_GZ="immortalwrt-x86-64-generic-squashfs-combined-efi.img.gz" # 压缩文件名
-# 从压缩文件名自动生成解压后的文件名（移除 .gz）
-IMAGE_FILENAME_IMG="${IMAGE_FILENAME_GZ%.gz}"
-TMP_DIR="/tmp"
-IMAGE_PATH_GZ="$TMP_DIR/$IMAGE_FILENAME_GZ"
-IMAGE_PATH_IMG="$TMP_DIR/$IMAGE_FILENAME_IMG"
+REPO="xuanranran/OpenWRT-X86_64"                                           # 目标 GitHub 仓库
+IMAGE_FILENAME_GZ="immortalwrt-x86-64-generic-squashfs-combined-efi.img.gz" # 压缩固件的文件名
+IMAGE_FILENAME_IMG="${IMAGE_FILENAME_GZ%.gz}"                             # 解压后的固件文件名 (自动从压缩文件名生成)
+TMP_DIR="/tmp"                                                             # 临时文件目录
+IMAGE_PATH_GZ="$TMP_DIR/$IMAGE_FILENAME_GZ"                                # 压缩固件的完整路径
+IMAGE_PATH_IMG="$TMP_DIR/$IMAGE_FILENAME_IMG"                              # 解压后固件的完整路径
 
 # --- 退出脚本时清理临时文件 ---
 cleanup() {
@@ -16,51 +15,55 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# --- 设置：如果任何命令失败则退出 ---
+# --- 设置：如果任何命令失败则立即退出 ---
 set -e
 
-# --- 1. 检查依赖项 (只检查 wget, jq; 不再检查 gunzip/gzip) ---
-echo "INFO: Checking required tools (wget, jq)..."
+# --- 1. 检查依赖项 (检查 wget, jq, gunzip) ---
+echo "INFO: 检查所需工具 (wget, jq, gunzip)..." # 添加了 gunzip
 
-PKG_MANAGER=""
-INSTALL_CMD_VERB="" # e.g., "install" or "add"
-UPDATE_CMD_EXAMPLE="" # e.g., "opkg update" or "apk update"
+PKG_MANAGER=""             # 检测到的包管理器 (opkg 或 apk)
+INSTALL_CMD_VERB=""        # 安装命令动词 (install 或 add)
+UPDATE_CMD_EXAMPLE=""      # 更新命令示例 (opkg update 或 apk update)
 
-# Detect package manager
+# 检测包管理器
 if command -v opkg >/dev/null 2>&1; then
-    echo "INFO: Detected 'opkg' package manager (Standard OpenWrt)."
+    echo "INFO: 检测到 'opkg' 包管理器 (标准 OpenWrt)。"
     PKG_MANAGER="opkg"
     INSTALL_CMD_VERB="install"
     UPDATE_CMD_EXAMPLE="opkg update"
 elif command -v apk >/dev/null 2>&1; then
-    echo "INFO: Detected 'apk' package manager (Alpine/Recent OpenWrt Snapshot?)."
+    echo "INFO: 检测到 'apk' 包管理器 (Alpine / 近期 OpenWrt Snapshot?)。"
     PKG_MANAGER="apk"
-    INSTALL_CMD_VERB="add" # apk uses 'add'
+    INSTALL_CMD_VERB="add" # apk 使用 'add'
     UPDATE_CMD_EXAMPLE="apk update"
 else
     echo >&2 "错误：无法检测到 'opkg' 或 'apk' 包管理器。"
-    echo >&2 "请确保其中一个已安装并位于 PATH 中，或手动安装依赖项 (wget, jq)。"
+    # 注意：因为 gunzip 命令通常由 gzip 包提供，所以提示中包含 gzip
+    echo >&2 "请确保其中一个已安装并位于 PATH 中，或手动安装依赖项 (wget, jq, gzip)。"
     exit 1
 fi
 
-# --- 定义需要的 '命令' (使用简单数组，兼容性更好) ---
-required_cmds=( "wget" "jq" ) # 只需列出命令名
-missing_pkgs=() # 需要安装的软件包列表
-missing_cmds_found=() # 未找到的命令列表
+# --- 定义需要的 '命令' (使用简单数组) 以及提供它们的 '软件包' ---
+required_cmds=( "wget" "jq" "gunzip" ) # 添加 "gunzip"
+missing_pkgs=()                        # 需要安装的软件包列表
+missing_cmds_found=()                  # 未找到的命令列表
 
-# DEBUG: 打印数组定义和内容
-echo "DEBUG: Defining required_cmds array: required_cmds=( \"wget\" \"jq\" )"
-echo "DEBUG: required_cmds array contents are: ->${required_cmds[@]}<-" # 打印数组所有元素
+# DEBUG: 打印数组定义和内容 (保留调试信息以便解决之前的循环问题)
+echo "DEBUG: 定义 required_cmds 数组: required_cmds=( \"wget\" \"jq\" \"gunzip\" )"
+echo "DEBUG: required_cmds 数组内容是: ->${required_cmds[@]}<-"
 
-echo "INFO: 正在检查所需的 命令 (wget, jq) 并识别需要安装的 软件包..."
+echo "INFO: 正在检查所需的 命令 (wget, jq, gunzip) 并识别需要安装的 软件包..."
 for cmd_to_check in "${required_cmds[@]}"; do # 使用不同的循环变量名
-    echo "DEBUG: ---- Loop Iteration Start ----"
-    echo "DEBUG: Current value of cmd_to_check: '$cmd_to_check'" # DEBUG: 打印当前循环变量的值
+    echo "DEBUG: ---- 循环迭代开始 ----"
+    echo "DEBUG: 当前检查的命令: '$cmd_to_check'" # DEBUG: 打印当前循环变量的值
     echo "INFO:   检查 命令 '$cmd_to_check'..."
     # 在 command -v 中为变量加上引号，更安全
     if ! command -v "$cmd_to_check" >/dev/null 2>&1; then
-        # 对于 wget 和 jq, 软件包名与命令名相同
-        pkg_name="$cmd_to_check" # 为变量加上引号
+        # 确定提供该命令的包名 (gunzip 由 gzip 包提供)
+        pkg_name="$cmd_to_check" # 默认为命令名
+        if [ "$cmd_to_check" == "gunzip" ]; then
+            pkg_name="gzip" # 特殊处理：gunzip 命令由 gzip 包提供
+        fi
         echo "INFO:   命令 '$cmd_to_check' 未找到。这个命令通常由 软件包 '$pkg_name' 提供。"
         missing_cmds_found+=("$cmd_to_check") # 记录未找到的 命令
         # 将需要安装的 软件包 名称加入列表 (确保不重复添加)
@@ -70,10 +73,10 @@ for cmd_to_check in "${required_cmds[@]}"; do # 使用不同的循环变量名
     else
         echo "INFO:   命令 '$cmd_to_check' 已找到。"
     fi
-    echo "DEBUG: ---- Loop Iteration End ----"
+    echo "DEBUG: ---- 循环迭代结束 ----"
 done
 
-# --- 如果有缺失 (wget 或 jq)，报告并退出 ---
+# --- 如果有缺失 (wget, jq 或 gunzip)，报告并退出 ---
 if [ ${#missing_pkgs[@]} -gt 0 ]; then
     # 将数组转换为用空格分隔的字符串以便打印
     missing_cmds_str=$(IFS=" "; echo "${missing_cmds_found[*]}") # 使用正确的数组名
@@ -86,11 +89,9 @@ if [ ${#missing_pkgs[@]} -gt 0 ]; then
     exit 1
 fi
 
-echo "INFO: Required dependencies (wget, jq) are available."
-echo "WARN: Script now assumes 'gunzip' command is available without checking."
+echo "INFO: 所有必需的依赖项 (wget, jq, gunzip) 都已找到。" # 更新消息
 
 # --- 2. 临时增大 /tmp 分区 ---
-# ... (后续步骤保持不变) ...
 echo "INFO: 尝试临时将 /tmp 重新挂载为更大内存（RAM 的 100%）。.."
 echo "      注意：此更改仅在本次运行期间有效，重启后失效。"
 mount -t tmpfs -o remount,size=100% tmpfs /tmp || echo "WARN: remount /tmp 可能失败或不受支持，继续执行..."
@@ -100,9 +101,10 @@ df -h /tmp
 
 # --- 3. 获取最新 Release 信息 ---
 echo "INFO: 正在从 GitHub 获取 '$REPO' 的最新版本信息..."
-API_URL="https://api.github.com/repos/$REPO/releases/latest"
-RELEASE_INFO=$(wget -qO- --no-check-certificate "$API_URL")
+API_URL="https://api.github.com/repos/$REPO/releases/latest" # GitHub API 地址
+RELEASE_INFO=$(wget -qO- --no-check-certificate "$API_URL")  # 下载 Release 信息
 
+# 检查是否成功获取信息
 if [ -z "$RELEASE_INFO" ]; then
     echo >&2 "错误：无法从 GitHub API 获取版本信息。请检查网络连接或仓库 '$REPO' 是否存在。"
     exit 1
@@ -110,9 +112,9 @@ fi
 
 # --- 4. 查找固件文件 URL ---
 echo "INFO: 正在查找压缩固件 '$IMAGE_FILENAME_GZ' 的下载链接..."
-# 使用 jq 解析 JSON
+# 使用 jq 解析 JSON 数据，提取目标文件的下载链接
 IMAGE_URL=$(echo "$RELEASE_INFO" | jq -r --arg NAME "$IMAGE_FILENAME_GZ" '.assets[] | select(.name==$NAME) | .browser_download_url')
-RELEASE_TAG=$(echo "$RELEASE_INFO" | jq -r '.tag_name // "未知标签"') # 获取版本标签
+RELEASE_TAG=$(echo "$RELEASE_INFO" | jq -r '.tag_name // "未知标签"') # 获取版本标签名
 
 # 检查是否成功找到 URL
 if [ -z "$IMAGE_URL" ] || [ "$IMAGE_URL" == "null" ]; then
@@ -124,12 +126,12 @@ echo "INFO: 压缩固件下载链接: $IMAGE_URL"
 
 # --- 5. 下载压缩固件 ---
 echo "INFO: 正在下载压缩固件 '$IMAGE_FILENAME_GZ' 到 '$IMAGE_PATH_GZ' ..."
-wget --progress=bar:force --no-check-certificate -O "$IMAGE_PATH_GZ" "$IMAGE_URL"
+wget --progress=bar:force --no-check-certificate -O "$IMAGE_PATH_GZ" "$IMAGE_URL" # 使用 wget 下载，显示进度条
 echo "INFO: 压缩固件下载完成。"
 
 # --- 6. 解压固件 (需要 gunzip 命令) ---
 echo "INFO: 正在解压固件 '$IMAGE_PATH_GZ' -> '$IMAGE_PATH_IMG' ..."
-# 使用 gunzip 命令进行解压。如果 gunzip 不存在，脚本将在此处失败！
+# 使用 gunzip 命令进行解压。 set -e 会确保如果 gunzip 失败则脚本退出
 gunzip "$IMAGE_PATH_GZ"
 
 # 检查解压后的文件是否存在
@@ -138,7 +140,7 @@ if [ ! -f "$IMAGE_PATH_IMG" ]; then
      exit 1
 fi
 echo "INFO: 固件解压完成。解压后文件: '$IMAGE_PATH_IMG'"
-ls -lh "$IMAGE_PATH_IMG" # 显示解压后文件的大小
+ls -lh "$IMAGE_PATH_IMG" # 显示解压后文件的大小信息
 echo "警告：已跳过文件完整性校验！请自行承担风险。"
 
 
@@ -154,7 +156,7 @@ echo "警告：本次升级未进行文件完整性校验！"
 echo "升级过程中，请务必保持设备通电，不要中断操作！"
 echo "升级会尝试保留现有配置，但建议提前备份重要数据。"
 echo "---------------------------------------------------------------------"
-read -p "确认要开始执行 sysupgrade 升级吗？(y/N): " confirm_upgrade
+read -p "确认要开始执行 sysupgrade 升级吗？(y/N): " confirm_upgrade # 升级前最后确认
 
 if [[ "$confirm_upgrade" =~ ^[Yy]$ ]]; then
     echo "INFO: 正在执行 sysupgrade 命令..."
