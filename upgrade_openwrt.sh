@@ -43,37 +43,44 @@ else
     exit 1
 fi
 
-# --- Define required commands and check ---
-# Maps required command -> package name providing it
-required_pkgs_map=( ["wget"]="wget" ["jq"]="jq" ["gunzip"]="gzip" )
-missing_pkgs=() # List of package names to install
-missing_cmds=() # List of commands not found
+# --- 定义需要的 '命令' 以及通常提供这些命令的 '软件包' ---
+# 脚本检查特定的 '命令' 是否存在 (例如 gunzip)。
+# 如果 '命令' 缺失，脚本会识别出通常需要安装哪个 '软件包' (例如 gzip)。
+# 注意：命令 'gunzip' 通常由软件包 'gzip' 提供。它们不是同一个东西。
+required_pkgs_map=( ["wget"]="wget" ["jq"]="jq" ["gunzip"]="gzip" ) # 映射: 命令 -> 软件包名
+missing_pkgs=() # 需要安装的软件包列表
+missing_cmds=() # 未找到的命令列表
 
+echo "INFO: 正在检查所需的 命令 并识别需要安装的 软件包..."
 for cmd in "${!required_pkgs_map[@]}"; do
+    echo "INFO:   检查 命令 '$cmd'..."
     if ! command -v $cmd >/dev/null 2>&1; then
-        missing_cmds+=("$cmd") # Add the command that wasn't found
         pkg_name=${required_pkgs_map[$cmd]}
-        # Add package name to list only if not already added
+        echo "INFO:   命令 '$cmd' 未找到。这个命令通常由 软件包 '$pkg_name' 提供。"
+        missing_cmds+=("$cmd") # 记录未找到的 命令
+        # 将需要安装的 软件包 名称加入列表 (确保不重复添加)
         if ! [[ " ${missing_pkgs[@]} " =~ " ${pkg_name} " ]]; then
              missing_pkgs+=("$pkg_name")
         fi
+    else
+        echo "INFO:   命令 '$cmd' 已找到。"
     fi
 done
 
-# --- Report missing packages and exit ---
+# --- 如果有缺失，报告并退出 ---
 if [ ${#missing_pkgs[@]} -gt 0 ]; then
-    # Convert arrays to space-separated strings for printing
+    # 将数组转换为用空格分隔的字符串以便打印
     missing_cmds_str=$(IFS=" "; echo "${missing_cmds[*]}")
     missing_pkgs_str=$(IFS=" "; echo "${missing_pkgs[*]}")
 
-    echo >&2 "错误：脚本运行缺少必要的命令: ${missing_cmds_str}"
-    echo >&2 "检测到包管理器为 '$PKG_MANAGER'。请安装对应的包: ${missing_pkgs_str}"
-    # Provide the example install command
+    echo >&2 "错误：脚本运行缺少必要的 命令: ${missing_cmds_str}"
+    echo >&2 "检测到包管理器为 '$PKG_MANAGER'。请安装对应的 软件包: ${missing_pkgs_str}"
+    # 给出安装相应 软件包 的示例命令
     echo >&2 "请运行: ${UPDATE_CMD_EXAMPLE} && ${PKG_MANAGER} ${INSTALL_CMD_VERB} ${missing_pkgs_str}"
     exit 1
 fi
 
-echo "INFO: All required dependencies are available."
+echo "INFO: 所有必需的依赖项 (命令) 都已找到。"
 
 # --- 2. 临时增大 /tmp 分区 ---
 echo "INFO: 尝试临时将 /tmp 重新挂载为更大内存（RAM 的 100%）。.."
@@ -114,7 +121,7 @@ echo "INFO: 压缩固件下载完成。"
 
 # --- 6. 解压固件 ---
 echo "INFO: 正在解压固件 '$IMAGE_PATH_GZ' -> '$IMAGE_PATH_IMG' ..."
-# gunzip 默认会删除源文件 (.gz)
+# 使用 gunzip 命令进行解压
 gunzip "$IMAGE_PATH_GZ"
 
 # 检查解压后的文件是否存在
