@@ -17,34 +17,99 @@ cleanup() {
 trap cleanup EXIT
 
 # --- 设置：如果任何命令失败则退出 ---
-set -e
+# Temporarily disable set -e during dependency checks/installs
+# set -e
 
-# --- 1. 检查依赖项 ---
-echo "INFO: 检查所需工具 (wget, jq, gunzip)..."
-missing_pkgs=""
-# 检查 wget
-command -v wget >/dev/null 2>&1 || missing_pkgs="${missing_pkgs} wget"
-# 检查 jq
-command -v jq >/dev/null 2>&1 || missing_pkgs="${missing_pkgs} jq"
-# 检查 gunzip (通常在 gzip 包中)
-command -v gunzip >/dev/null 2>&1 || missing_pkgs="${missing_pkgs} gzip" # 注意包名是 gzip
+# --- 1. 检查并尝试安装依赖项 (自动检测 opkg 或 apk) ---
+echo "INFO: Checking and attempting to install required tools (wget, jq, gunzip)..."
+echo "      Note: This requires root privileges and internet access."
 
-# 如果有缺失的包，则报错退出
-if [ -n "$missing_pkgs" ]; then
-    # Trim leading space
-    missing_pkgs=$(echo "$missing_pkgs" | sed 's/^ *//')
-    echo >&2 "错误：脚本运行缺少必要的工具: ${missing_pkgs// /, }" # 替换空格为逗号和空格
-    echo >&2 "请先运行 'apk update && apk add ${missing_pkgs}' 来安装它们。"
+PKG_MANAGER=""
+UPDATE_CMD=""
+INSTALL_CMD=""
+PACKAGES_TO_INSTALL=""
+
+# Detect package manager
+if command -v opkg >/dev/null 2>&1; then
+    echo "INFO: Detected 'opkg' package manager (Standard OpenWrt)."
+    PKG_MANAGER="opkg"
+    UPDATE_CMD="opkg update"
+    INSTALL_CMD="opkg install"
+elif command -v apk >/dev/null 2>&1; then
+    echo "INFO: Detected 'apk' package manager (Alpine/Recent OpenWrt Snapshot?)."
+    PKG_MANAGER="apk"
+    UPDATE_CMD="apk update"
+    INSTALL_CMD="apk add" # apk uses 'add'
+else
+    echo >&2 "错误：无法检测到 'opkg' 或 'apk' 包管理器。"
+    echo >&2 "请确保其中一个已安装并位于 PATH 中，或手动安装依赖项 (wget, jq, gzip)。"
     exit 1
 fi
-echo "INFO: 依赖项检查通过。"
+
+update_run=0 # Flag to track if update command has been run
+
+# --- Define required packages and check ---
+# Package names happen to be the same for opkg and apk in this case
+required_pkgs_map=( ["wget"]="wget" ["jq"]="jq" ["gunzip"]="gzip" ) # Command -> Package Name
+missing_pkgs=()
+
+for cmd in "${!required_pkgs_map[@]}"; do
+    if ! command -v $cmd >/dev/null 2>&1; then
+        pkg_name=${required_pkgs_map[$cmd]}
+        # Add package name to list only if not already added
+        if ! [[ " ${missing_pkgs[@]} " =~ " ${pkg_name} " ]]; then
+             missing_pkgs+=("$pkg_name")
+        fi
+    fi
+done
+
+# --- Attempt to install missing packages ---
+if [ ${#missing_pkgs[@]} -gt 0 ]; then
+    echo "INFO: Missing required packages for commands: ${missing_pkgs[*]}"
+    echo "INFO: Attempting to install using '$PKG_MANAGER'..."
+
+    # Run update command once
+    if [ "$update_run" -eq 0 ]; then
+        echo "INFO: Running package list update ($UPDATE_CMD)..."
+        $UPDATE_CMD
+        if [ $? -ne 0 ]; then
+             echo "警告：包列表更新命令 '$UPDATE_CMD' 失败，但仍将尝试安装..."
+        fi
+        update_run=1
+    fi
+
+    # Install missing packages
+    echo "INFO: Running install command ($INSTALL_CMD ${missing_pkgs[*]})..."
+    $INSTALL_CMD ${missing_pkgs[*]}
+
+    # Re-check all dependencies after install attempt
+    echo "INFO: Re-checking dependencies after installation attempt..."
+    final_missing_cmds=()
+    for cmd in "${!required_pkgs_map[@]}"; do
+        if ! command -v $cmd >/dev/null 2>&1; then
+            final_missing_cmds+=("$cmd")
+        fi
+    done
+
+    if [ ${#final_missing_cmds[@]} -gt 0 ]; then
+         echo >&2 "错误：安装依赖项失败。仍然缺失命令: ${final_missing_cmds[*]}"
+         echo >&2 "请检查网络连接、包管理器配置 ($PKG_MANAGER)，并尝试手动安装。"
+         exit 1
+     else
+         echo "INFO: All required packages installed successfully."
+     fi
+fi
+
+echo "INFO: All required dependencies are available."
+# Re-enable set -e for subsequent steps if strict error checking is desired
+set -e
 
 # --- 2. 临时增大 /tmp 分区 ---
 echo "INFO: 尝试临时将 /tmp 重新挂载为更大内存（RAM 的 100%）。.."
 echo "      注意：此更改仅在本次运行期间有效，重启后失效。"
-mount -t tmpfs -o remount,size=100% tmpfs /tmp
+mount -t tmpfs -o remount,size=100% tmpfs /tmp || echo "WARN: remount /tmp 可能失败或不受支持，继续执行..."
 echo "INFO: /tmp 当前挂载信息和大小:"
-mount | grep " /tmp "
+mount | grep " /tmp " || echo "INFO: /tmp 可能未显示在 mount 输出中，或不是独立挂载点。"
 df -h /tmp
 
 # --- 3. 获取最新 Release 信息 ---
@@ -74,22 +139,12 @@ echo "INFO: 压缩固件下载链接: $IMAGE_URL"
 # --- 5. 下载压缩固件 ---
 echo "INFO: 正在下载压缩固件 '$IMAGE_FILENAME_GZ' 到 '$IMAGE_PATH_GZ' ..."
 wget --progress=bar:force --no-check-certificate -O "$IMAGE_PATH_GZ" "$IMAGE_URL"
-if [ $? -ne 0 ]; then
-    echo >&2 "错误：下载压缩固件失败。"
-    # trap 会自动清理
-    exit 1
-fi
 echo "INFO: 压缩固件下载完成。"
 
 # --- 6. 解压固件 ---
 echo "INFO: 正在解压固件 '$IMAGE_PATH_GZ' -> '$IMAGE_PATH_IMG' ..."
 # gunzip 默认会删除源文件 (.gz)
 gunzip "$IMAGE_PATH_GZ"
-if [ $? -ne 0 ]; then
-    echo >&2 "错误：解压固件 '$IMAGE_PATH_GZ' 失败。"
-    # trap 会清理可能存在的 .gz 文件
-    exit 1
-fi
 
 # 检查解压后的文件是否存在
 if [ ! -f "$IMAGE_PATH_IMG" ]; then
@@ -101,9 +156,10 @@ ls -lh "$IMAGE_PATH_IMG" # 显示解压后文件的大小
 echo "警告：已跳过文件完整性校验！请自行承担风险。"
 
 
-# --- 7. 执行升级 ---
+# --- 7. 执行升级 (仍使用 sysupgrade，请确认这在 apk 基础的快照上是否仍然适用) ---
 echo "---------------------------------------------------------------------"
 echo "警告：即将开始系统升级！"
+echo "      假定 'sysupgrade' 仍然是适用于此系统的升级命令。"
 echo "将使用以下 *解压后* 的固件文件进行升级："
 echo "$IMAGE_PATH_IMG"
 echo ""
@@ -127,4 +183,4 @@ else
     exit 0
 fi
 
-exit 0
+exit 0 # 备用退出点
