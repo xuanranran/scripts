@@ -149,7 +149,7 @@ echo "信息：尝试临时将 /tmp 重新挂载为更大内存（RAM 的 100%�
 echo "      注意：此更改仅在本次运行期间有效，重启后失效。"
 mount -t tmpfs -o remount,size=100% tmpfs /tmp || echo "警告：重新挂载 /tmp 可能失败或不受支持，继续执行..."
 echo "信息：/tmp 当前挂载信息和大小:"
-mount | grep " /tmp " || echo "信息：/tmp 可能未显示在 mount 输出中，或不是独立挂载点。"
+# mount | grep " /tmp " || echo "信息：/tmp 可能未显示在 mount 输出中，或不是独立挂载点。"
 df -h /tmp
 
 # --- 3. 获取最新 Release 信息 ---
