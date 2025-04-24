@@ -21,7 +21,7 @@ trap cleanup EXIT
 # set -e
 
 # --- 1. 检查并尝试安装依赖项 (检查 wget, jq, gunzip, awk) ---
-echo "信息：正在检查并尝试安装所需工具 (wget, jq, gunzip, awk)..." # 添加了 awk
+echo "信息：正在检查并尝试安装所需工具 (wget, jq, gunzip, awk)..."
 
 PKG_MANAGER=""             # 检测到的包管理器 (opkg 或 apk)
 UPDATE_CMD=""              # 更新命令
@@ -29,7 +29,7 @@ INSTALL_CMD=""             # 安装命令
 
 # 检测包管理器
 if command -v opkg >/dev/null 2>&1; then
-    echo "信息：检测到 'opkg' 包管理器 (OpenWrt 24.10.1-Snapshot)。"
+    echo "信息：检测到 'opkg' 包管理器 (标准 OpenWrt)。"
     PKG_MANAGER="opkg"
     UPDATE_CMD="opkg update"
     INSTALL_CMD="opkg install"
@@ -40,7 +40,6 @@ elif command -v apk >/dev/null 2>&1; then
     INSTALL_CMD="apk add" # apk 使用 'add'
 else
     echo >&2 "错误：无法检测到 'opkg' 或 'apk' 包管理器。"
-    # 注意：gunzip 命令通常由 gzip 包提供, awk 通常由 busybox 提供
     echo >&2 "请确保其中一个已安装并位于 PATH 中，或手动安装依赖项 (wget, jq, gzip)。awk 通常包含在 busybox 中。"
     exit 1
 fi
@@ -57,7 +56,6 @@ for cmd_to_check in "${required_cmds[@]}"; do
     echo "信息：  检查 命令 '$cmd_to_check'..."
     if ! command -v "$cmd_to_check" >/dev/null 2>&1; then
         pkg_name="" # 假设初始没有独立包
-        # 确定提供该命令的包名
         if [ "$cmd_to_check" == "gunzip" ]; then
             pkg_name="gzip"
         elif [ "$cmd_to_check" == "wget" ] || [ "$cmd_to_check" == "jq" ]; then
@@ -66,15 +64,12 @@ for cmd_to_check in "${required_cmds[@]}"; do
 
         echo "信息：  命令 '$cmd_to_check' 未找到。"
         missing_cmds_found_initially+=("$cmd_to_check") # 记录未找到的 命令
-
-        # 只将明确需要安装的包加入列表
         if [ -n "$pkg_name" ]; then
             echo "        这个命令通常由 软件包 '$pkg_name' 提供。"
             if ! [[ " ${missing_pkgs[@]} " =~ " ${pkg_name} " ]]; then
                  missing_pkgs+=("$pkg_name")
             fi
         else
-             # awk 通常是 busybox 的一部分
              echo "        这个命令 ('$cmd_to_check') 通常由系统基础包 (如 busybox) 提供。"
         fi
     else
@@ -88,7 +83,6 @@ if [ ${#missing_pkgs[@]} -gt 0 ]; then
     echo "信息：检测到缺失必需的软件包: ${missing_pkgs_str}"
     echo "信息：正在尝试使用 '$PKG_MANAGER' 进行安装..."
 
-    # 运行一次更新命令
     if [ "$update_run" -eq 0 ]; then
         echo "信息：正在运行软件包列表更新 ($UPDATE_CMD)..."
         set +e; $UPDATE_CMD; update_status=$?; set -e
@@ -98,14 +92,12 @@ if [ ${#missing_pkgs[@]} -gt 0 ]; then
         update_run=1
     fi
 
-    # 安装缺失的软件包
     echo "信息：正在运行安装命令 ($INSTALL_CMD ${missing_pkgs_str})..."
     set +e; $INSTALL_CMD ${missing_pkgs_str}; install_status=$?; set -e
     if [ $install_status -ne 0 ]; then
         echo "警告：软件包安装命令 '$INSTALL_CMD ${missing_pkgs_str}' 的退出码为 $install_status。"
     fi
 
-    # 重新检查所有最初缺失的命令（包括可能未尝试安装的 awk）
     echo "信息：正在重新检查依赖项..."
     final_recheck_missing_cmds=()
     for cmd_to_recheck in "${missing_cmds_found_initially[@]}"; do
@@ -114,7 +106,6 @@ if [ ${#missing_pkgs[@]} -gt 0 ]; then
         fi
     done
 
-    # 如果安装后仍然有命令缺失，则报错退出
     if [ ${#final_recheck_missing_cmds[@]} -gt 0 ]; then
          final_missing_cmds_str=$(IFS=" "; echo "${final_recheck_missing_cmds[*]}")
          echo >&2 "错误：必需的依赖项安装失败或仍然缺失。"
@@ -130,7 +121,6 @@ if [ ${#missing_pkgs[@]} -gt 0 ]; then
      fi
 fi
 
-# 最终确认所有命令都存在
 echo "信息：依赖项最终检查..."
 final_check_missing_cmds=()
 for cmd_to_verify in "${required_cmds[@]}"; do
@@ -142,7 +132,6 @@ done
 if [ ${#final_check_missing_cmds[@]} -gt 0 ]; then
     final_missing_cmds_str=$(IFS=" "; echo "${final_check_missing_cmds[*]}")
     echo >&2 "错误：脚本运行缺少必要的命令: ${final_missing_cmds_str}"
-    # 提示具体原因
     if [[ " ${final_missing_cmds_str} " =~ " awk " ]]; then
          echo >&2 "       'awk' 命令缺失，这通常表明系统基础 (busybox) 不完整，脚本无法继续。"
     else
@@ -213,7 +202,7 @@ KEEP_DATA_ALLOWED=1 # 标记是否允许保留数据 (1=允许, 0=不允许)
 
 if [ -z "$AVAILABLE_KIB" ] || ! [[ "$AVAILABLE_KIB" =~ ^[0-9]+$ ]]; then
     echo "警告：无法准确获取 /tmp 可用空间。将允许用户选择是否保留配置。"
-    KEEP_DATA_ALLOWED=1 # 获取失败时，允许用户选择以防误判
+    KEEP_DATA_ALLOWED=1
 elif [ "$AVAILABLE_KIB" -lt "$THRESHOLD_KIB" ]; then
     echo "警告：/tmp 可用空间 (${AVAILABLE_KIB} KiB) 低于所需阈值 (${THRESHOLD_KIB} KiB)。"
     echo "      为了保证升级成功，将强制不保留配置数据进行升级 (使用 -n 选项)。"
@@ -224,23 +213,19 @@ else
     KEEP_DATA_ALLOWED=1
 fi
 
-# 如果空间允许，询问用户是否保留数据
 if [ "$KEEP_DATA_ALLOWED" -eq 1 ]; then
-    # 默认为 Y (保留数据)
     read -p "您想在升级时保留配置数据吗？(Y/n): " confirm_keep_data
-    # 只有当用户明确输入 n 或 N 时才不保留数据
     if [[ "$confirm_keep_data" =~ ^[Nn]$ ]]; then
         echo "信息：用户选择不保留配置数据进行升级。"
         SYSUPGRADE_ARGS="-n"
     else
         echo "信息：将尝试保留配置数据进行升级。"
-        SYSUPGRADE_ARGS="" # 明确设置为空，表示保留数据
+        SYSUPGRADE_ARGS=""
     fi
-# 如果空间不允许，SYSUPGRADE_ARGS 已经被设为 "-n"
 fi
 
 # --- 8. 执行升级 ---
-# 设置最终的提示信息，告知用户配置是否保留
+# 设置最终的提示信息
 UPGRADE_INFO="将使用以下 *解压后* 的固件文件进行升级：\n$IMAGE_PATH_IMG\n"
 if [ "$SYSUPGRADE_ARGS" == "-n" ]; then
     UPGRADE_INFO="${UPGRADE_INFO}\n注意：升级将不会保留现有的配置数据！(使用 -n 选项)\n"
@@ -248,32 +233,42 @@ else
     UPGRADE_INFO="${UPGRADE_INFO}\n注意：升级将尝试保留现有的配置数据。\n"
 fi
 
+# *** 添加关于 -F 选项的强制警告 ***
+FORCE_WARN="\n\n!!!!!!!!!!!!!!!!!!!!!!!!!!!! 极 度 危 险 警 告 !!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+FORCE_WARN="${FORCE_WARN} 本次升级将强制使用 '-F' (force) 选项！\n"
+FORCE_WARN="${FORCE_WARN} 这会跳过固件的兼容性检查和部分安全验证！\n"
+FORCE_WARN="${FORCE_WARN} 如果固件文件不正确、损坏或不兼容您的设备型号，\n"
+FORCE_WARN="${FORCE_WARN} 使用 '-F' 强制升级【极有可能导致设备变砖且无法恢复】！\n"
+FORCE_WARN="${FORCE_WARN} 请务必确保您已下载了完全正确的固件文件，并完全理解此操作的风险！\n"
+FORCE_WARN="${FORCE_WARN}!!!!!!!!!!!!!!!!!!!!!!!!!!!! 极 度 危 险 警 告 !!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+
 echo "---------------------------------------------------------------------"
-echo -e "警告：即将开始系统升级！" # 使用 -e 来解释 \n 换行符
-echo "      假定 'sysupgrade' 仍然是适用于此系统的升级命令。"
-echo "      (如果你的系统基于 apk 且升级方式已改变，请勿继续！)"
-echo -e "$UPGRADE_INFO" # 打印包含配置保留状态的升级信息
+echo -e "警告：即将开始系统升级！"
+echo -e "$UPGRADE_INFO"
+echo -e "$FORCE_WARN" # *** 显示强制升级警告 ***
 echo "警告：本次升级未进行文件完整性校验！"
 echo "升级过程中，请务必保持设备通电，不要中断操作！"
-# 只有在尝试保留配置时才强烈建议备份（不保留配置则无需此建议）
 if [ -z "$SYSUPGRADE_ARGS" ]; then
     echo "建议提前备份重要数据。"
 fi
 echo "---------------------------------------------------------------------"
-# 最终确认
-read -p "确认要开始执行 sysupgrade 升级吗？ (y/N): " confirm_upgrade
+# *** 修改确认提示，强调风险 ***
+read -p "您已阅读并完全理解强制升级 (-F) 的风险，确认要开始执行吗？ (y/N): " confirm_upgrade
 
 if [[ "$confirm_upgrade" =~ ^[Yy]$ ]]; then
-    echo "信息：正在执行 sysupgrade 命令 (参数: '$SYSUPGRADE_ARGS')..."
-    # 使用解压后的文件和确定的参数进行升级
-    sysupgrade $SYSUPGRADE_ARGS "$IMAGE_PATH_IMG"
+    # *** 修改点：明确提示正在使用 -F ***
+    if [ -z "$SYSUPGRADE_ARGS" ]; then
+        echo "信息：正在强制执行 sysupgrade 命令 (-F, 保留数据)..."
+    else # $SYSUPGRADE_ARGS is -n
+        echo "信息：正在强制执行 sysupgrade 命令 (-F, 不保留数据)..."
+    fi
+    # *** 修改点：在 sysupgrade 命令中添加 -F 参数 ***
+    sysupgrade -F $SYSUPGRADE_ARGS "$IMAGE_PATH_IMG"
 
-    # 如果 sysupgrade 成功，系统通常会自动重启
     echo "信息：sysupgrade 命令已执行。如果成功，系统将会重启。"
     exit 0
 else
     echo "操作已取消。解压后的固件文件保留在 '$IMAGE_PATH_IMG'，您可以手动升级或删除它。"
-    # trap 会自动清理
     exit 0
 fi
 
