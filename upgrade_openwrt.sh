@@ -20,7 +20,7 @@ trap cleanup EXIT
 set -e
 
 # --- 1. 检查依赖项 (只检查 wget, jq; 不再检查 gunzip/gzip) ---
-echo "INFO: Checking required tools (wget, jq)..." # 移除了 gunzip
+echo "INFO: Checking required tools (wget, jq)..."
 
 PKG_MANAGER=""
 INSTALL_CMD_VERB="" # e.g., "install" or "add"
@@ -39,22 +39,23 @@ elif command -v apk >/dev/null 2>&1; then
     UPDATE_CMD_EXAMPLE="apk update"
 else
     echo >&2 "错误：无法检测到 'opkg' 或 'apk' 包管理器。"
-    echo >&2 "请确保其中一个已安装并位于 PATH 中，或手动安装依赖项 (wget, jq)。" # 移除了 gzip
+    echo >&2 "请确保其中一个已安装并位于 PATH 中，或手动安装依赖项 (wget, jq)。"
     exit 1
 fi
 
-# --- 定义需要的 '命令' 以及提供这些命令的 '软件包' (已移除 gunzip/gzip) ---
-required_pkgs_map=( ["wget"]="wget" ["jq"]="jq" ) # 映射: 命令 -> 软件包名
+# --- 定义需要的 '命令' (使用简单数组，兼容性更好) ---
+required_cmds=( "wget" "jq" ) # 只需列出命令名
 missing_pkgs=() # 需要安装的软件包列表
-missing_cmds=() # 未找到的命令列表
+missing_cmds_found=() # 未找到的命令列表
 
 echo "INFO: 正在检查所需的 命令 (wget, jq) 并识别需要安装的 软件包..."
-for cmd in "${!required_pkgs_map[@]}"; do
+for cmd in "${required_cmds[@]}"; do
     echo "INFO:   检查 命令 '$cmd'..."
     if ! command -v $cmd >/dev/null 2>&1; then
-        pkg_name=${required_pkgs_map[$cmd]}
+        # 对于 wget 和 jq, 软件包名与命令名相同
+        pkg_name=$cmd
         echo "INFO:   命令 '$cmd' 未找到。这个命令通常由 软件包 '$pkg_name' 提供。"
-        missing_cmds+=("$cmd") # 记录未找到的 命令
+        missing_cmds_found+=("$cmd") # 记录未找到的 命令
         # 将需要安装的 软件包 名称加入列表 (确保不重复添加)
         if ! [[ " ${missing_pkgs[@]} " =~ " ${pkg_name} " ]]; then
              missing_pkgs+=("$pkg_name")
@@ -67,7 +68,7 @@ done
 # --- 如果有缺失 (wget 或 jq)，报告并退出 ---
 if [ ${#missing_pkgs[@]} -gt 0 ]; then
     # 将数组转换为用空格分隔的字符串以便打印
-    missing_cmds_str=$(IFS=" "; echo "${missing_cmds[*]}")
+    missing_cmds_str=$(IFS=" "; echo "${missing_cmds_found[*]}") # 使用正确的数组名
     missing_pkgs_str=$(IFS=" "; echo "${missing_pkgs[*]}")
 
     echo >&2 "错误：脚本运行缺少必要的 命令: ${missing_cmds_str}"
