@@ -19,8 +19,8 @@ trap cleanup EXIT
 # --- 设置：如果任何命令失败则退出 ---
 set -e
 
-# --- 1. 检查依赖项 (自动检测 opkg 或 apk, 但不安装) ---
-echo "INFO: Checking required tools (wget, jq, gunzip)..."
+# --- 1. 检查依赖项 (只检查 wget, jq; 不再检查 gunzip/gzip) ---
+echo "INFO: Checking required tools (wget, jq)..." # 移除了 gunzip
 
 PKG_MANAGER=""
 INSTALL_CMD_VERB="" # e.g., "install" or "add"
@@ -39,19 +39,16 @@ elif command -v apk >/dev/null 2>&1; then
     UPDATE_CMD_EXAMPLE="apk update"
 else
     echo >&2 "错误：无法检测到 'opkg' 或 'apk' 包管理器。"
-    echo >&2 "请确保其中一个已安装并位于 PATH 中，或手动安装依赖项 (wget, jq, gzip)。"
+    echo >&2 "请确保其中一个已安装并位于 PATH 中，或手动安装依赖项 (wget, jq)。" # 移除了 gzip
     exit 1
 fi
 
-# --- 定义需要的 '命令' 以及通常提供这些命令的 '软件包' ---
-# 脚本检查特定的 '命令' 是否存在 (例如 gunzip)。
-# 如果 '命令' 缺失，脚本会识别出通常需要安装哪个 '软件包' (例如 gzip)。
-# 注意：命令 'gunzip' 通常由软件包 'gzip' 提供。它们不是同一个东西。
-required_pkgs_map=( ["wget"]="wget" ["jq"]="jq" ["gunzip"]="gzip" ) # 映射: 命令 -> 软件包名
+# --- 定义需要的 '命令' 以及提供这些命令的 '软件包' (已移除 gunzip/gzip) ---
+required_pkgs_map=( ["wget"]="wget" ["jq"]="jq" ) # 映射: 命令 -> 软件包名
 missing_pkgs=() # 需要安装的软件包列表
 missing_cmds=() # 未找到的命令列表
 
-echo "INFO: 正在检查所需的 命令 并识别需要安装的 软件包..."
+echo "INFO: 正在检查所需的 命令 (wget, jq) 并识别需要安装的 软件包..."
 for cmd in "${!required_pkgs_map[@]}"; do
     echo "INFO:   检查 命令 '$cmd'..."
     if ! command -v $cmd >/dev/null 2>&1; then
@@ -67,7 +64,7 @@ for cmd in "${!required_pkgs_map[@]}"; do
     fi
 done
 
-# --- 如果有缺失，报告并退出 ---
+# --- 如果有缺失 (wget 或 jq)，报告并退出 ---
 if [ ${#missing_pkgs[@]} -gt 0 ]; then
     # 将数组转换为用空格分隔的字符串以便打印
     missing_cmds_str=$(IFS=" "; echo "${missing_cmds[*]}")
@@ -80,7 +77,8 @@ if [ ${#missing_pkgs[@]} -gt 0 ]; then
     exit 1
 fi
 
-echo "INFO: 所有必需的依赖项 (命令) 都已找到。"
+echo "INFO: Required dependencies (wget, jq) are available."
+echo "WARN: Script now assumes 'gunzip' command is available without checking."
 
 # --- 2. 临时增大 /tmp 分区 ---
 echo "INFO: 尝试临时将 /tmp 重新挂载为更大内存（RAM 的 100%）。.."
@@ -119,9 +117,9 @@ echo "INFO: 正在下载压缩固件 '$IMAGE_FILENAME_GZ' 到 '$IMAGE_PATH_GZ' .
 wget --progress=bar:force --no-check-certificate -O "$IMAGE_PATH_GZ" "$IMAGE_URL"
 echo "INFO: 压缩固件下载完成。"
 
-# --- 6. 解压固件 ---
+# --- 6. 解压固件 (需要 gunzip 命令) ---
 echo "INFO: 正在解压固件 '$IMAGE_PATH_GZ' -> '$IMAGE_PATH_IMG' ..."
-# 使用 gunzip 命令进行解压
+# 使用 gunzip 命令进行解压。如果 gunzip 不存在，脚本将在此处失败！
 gunzip "$IMAGE_PATH_GZ"
 
 # 检查解压后的文件是否存在
