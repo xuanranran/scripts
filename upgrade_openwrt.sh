@@ -48,18 +48,12 @@ fi
 update_run=0 # 标记更新命令是否已运行
 
 # --- 定义需要的 '命令' 并检查 ---
-required_cmds=( "wget" "jq" "gunzip" "awk" ) # 添加 "awk"
+required_cmds=( "wget" "jq" "gunzip" "awk" ) # 需要检查的命令
 missing_pkgs=()                        # 需要安装的软件包列表 (不包含 busybox/awk)
 missing_cmds_found_initially=()        # 初始检查时未找到的命令列表
 
-# DEBUG: 打印数组定义和内容
-echo "调试：定义 required_cmds 数组: required_cmds=( \"wget\" \"jq\" \"gunzip\" \"awk\" )"
-echo "调试：required_cmds 数组内容是: ->${required_cmds[@]}<-"
-
 echo "信息：正在检查所需的 命令 (wget, jq, gunzip, awk) 并识别需要安装的 软件包..."
 for cmd_to_check in "${required_cmds[@]}"; do
-    echo "调试：---- 循环迭代开始 ----"
-    echo "调试：当前检查的命令: '$cmd_to_check'"
     echo "信息：  检查 命令 '$cmd_to_check'..."
     if ! command -v "$cmd_to_check" >/dev/null 2>&1; then
         pkg_name="" # 假设初始没有独立包
@@ -86,7 +80,6 @@ for cmd_to_check in "${required_cmds[@]}"; do
     else
         echo "信息：  命令 '$cmd_to_check' 已找到。"
     fi
-    echo "调试：---- 循环迭代结束 ----"
 done
 
 # --- 尝试安装缺失的软件包 (wget, jq, gzip only) ---
