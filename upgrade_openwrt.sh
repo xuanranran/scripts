@@ -48,21 +48,29 @@ required_cmds=( "wget" "jq" ) # 只需列出命令名
 missing_pkgs=() # 需要安装的软件包列表
 missing_cmds_found=() # 未找到的命令列表
 
+# DEBUG: 打印数组定义和内容
+echo "DEBUG: Defining required_cmds array: required_cmds=( \"wget\" \"jq\" )"
+echo "DEBUG: required_cmds array contents are: ->${required_cmds[@]}<-" # 打印数组所有元素
+
 echo "INFO: 正在检查所需的 命令 (wget, jq) 并识别需要安装的 软件包..."
-for cmd in "${required_cmds[@]}"; do
-    echo "INFO:   检查 命令 '$cmd'..."
-    if ! command -v $cmd >/dev/null 2>&1; then
+for cmd_to_check in "${required_cmds[@]}"; do # 使用不同的循环变量名
+    echo "DEBUG: ---- Loop Iteration Start ----"
+    echo "DEBUG: Current value of cmd_to_check: '$cmd_to_check'" # DEBUG: 打印当前循环变量的值
+    echo "INFO:   检查 命令 '$cmd_to_check'..."
+    # 在 command -v 中为变量加上引号，更安全
+    if ! command -v "$cmd_to_check" >/dev/null 2>&1; then
         # 对于 wget 和 jq, 软件包名与命令名相同
-        pkg_name=$cmd
-        echo "INFO:   命令 '$cmd' 未找到。这个命令通常由 软件包 '$pkg_name' 提供。"
-        missing_cmds_found+=("$cmd") # 记录未找到的 命令
+        pkg_name="$cmd_to_check" # 为变量加上引号
+        echo "INFO:   命令 '$cmd_to_check' 未找到。这个命令通常由 软件包 '$pkg_name' 提供。"
+        missing_cmds_found+=("$cmd_to_check") # 记录未找到的 命令
         # 将需要安装的 软件包 名称加入列表 (确保不重复添加)
         if ! [[ " ${missing_pkgs[@]} " =~ " ${pkg_name} " ]]; then
              missing_pkgs+=("$pkg_name")
         fi
     else
-        echo "INFO:   命令 '$cmd' 已找到。"
+        echo "INFO:   命令 '$cmd_to_check' 已找到。"
     fi
+    echo "DEBUG: ---- Loop Iteration End ----"
 done
 
 # --- 如果有缺失 (wget 或 jq)，报告并退出 ---
@@ -82,6 +90,7 @@ echo "INFO: Required dependencies (wget, jq) are available."
 echo "WARN: Script now assumes 'gunzip' command is available without checking."
 
 # --- 2. 临时增大 /tmp 分区 ---
+# ... (后续步骤保持不变) ...
 echo "INFO: 尝试临时将 /tmp 重新挂载为更大内存（RAM 的 100%）。.."
 echo "      注意：此更改仅在本次运行期间有效，重启后失效。"
 mount -t tmpfs -o remount,size=100% tmpfs /tmp || echo "WARN: remount /tmp 可能失败或不受支持，继续执行..."
