@@ -176,6 +176,19 @@ echo "信息：找到最新版本 '$RELEASE_TAG'"
 echo "信息：压缩固件下载链接: $IMAGE_URL"
 
 # --- 5. 下载压缩固件 ---
+echo "---------------------------------------------------------------------"
+echo "已找到固件文件："
+echo "  版本标签: $RELEASE_TAG"
+echo "  下载链接: $IMAGE_URL"
+echo "  目标路径: $IMAGE_PATH_GZ"
+echo "---------------------------------------------------------------------"
+read -p "是否开始下载此固件文件？ (y/N): " confirm_download
+
+if [[ ! "$confirm_download" =~ ^[Yy]$ ]]; then
+    echo "操作已取消，未下载固件。"
+    exit 0
+fi
+
 echo "信息：正在下载压缩固件 '$IMAGE_FILENAME_GZ' 到 '$IMAGE_PATH_GZ' ..."
 wget --progress=bar:force --no-check-certificate -O "$IMAGE_PATH_GZ" "$IMAGE_URL"
 echo "信息：压缩固件下载完成。"
@@ -197,8 +210,8 @@ echo "警告：已跳过文件完整性校验！请自行承担风险。"
 echo "信息：正在检查 /tmp 可用空间以确定升级选项..."
 AVAILABLE_KIB=$(df -k /tmp | awk 'NR==2 {print $4}')
 
-SYSUPGRADE_ARGS="" # sysupgrade 命令参数，默认为空（保留配置）
-KEEP_DATA_ALLOWED=1 # 标记是否允许保留数据 (1=允许, 0=不允许)
+SYSUPGRADE_ARGS="" # sysupgrade 保留/不保留数据的参数 (-n 或空)
+KEEP_DATA_ALLOWED=1 # 标记是否允许保留数据
 
 if [ -z "$AVAILABLE_KIB" ] || ! [[ "$AVAILABLE_KIB" =~ ^[0-9]+$ ]]; then
     echo "警告：无法准确获取 /tmp 可用空间。将允许用户选择是否保留配置。"
@@ -224,8 +237,8 @@ if [ "$KEEP_DATA_ALLOWED" -eq 1 ]; then
     fi
 fi
 
-# --- 8. 执行升级 ---
-# 设置最终的提示信息
+# --- 8. 询问可选参数并执行升级 ---
+# 设置关于数据保留的基本提示信息
 UPGRADE_INFO="将使用以下 *解压后* 的固件文件进行升级：\n$IMAGE_PATH_IMG\n"
 if [ "$SYSUPGRADE_ARGS" == "-n" ]; then
     UPGRADE_INFO="${UPGRADE_INFO}\n注意：升级将不会保留现有的配置数据！(使用 -n 选项)\n"
@@ -233,37 +246,72 @@ else
     UPGRADE_INFO="${UPGRADE_INFO}\n注意：升级将尝试保留现有的配置数据。\n"
 fi
 
-# *** 添加关于 -F 选项的强制警告 ***
-FORCE_WARN="\n\n!!!!!!!!!!!!!!!!!!!!!!!!!!!! 极 度 危 险 警 告 !!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
-FORCE_WARN="${FORCE_WARN} 本次升级将强制使用 '-F' (force) 选项！\n"
-FORCE_WARN="${FORCE_WARN} 这会跳过固件的兼容性检查和部分安全验证！\n"
-FORCE_WARN="${FORCE_WARN} 如果固件文件不正确、损坏或不兼容您的设备型号，\n"
-FORCE_WARN="${FORCE_WARN} 使用 '-F' 强制升级【极有可能导致设备变砖且无法恢复】！\n"
-FORCE_WARN="${FORCE_WARN} 请务必确保您已下载了完全正确的固件文件，并完全理解此操作的风险！\n"
-FORCE_WARN="${FORCE_WARN}!!!!!!!!!!!!!!!!!!!!!!!!!!!! 极 度 危 险 警 告 !!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+# --- 询问是否强制升级 (-F) ---
+FORCE_FLAG="" # -F 参数标志，默认为空
+FORCE_WARN="\n\n!!!!!!!!!!!!!!!!!!!!!!!!!!!! 危 险 操 作 提 示 !!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+FORCE_WARN="${FORCE_WARN} '-F' (force) 选项会跳过固件兼容性检查。\n"
+FORCE_WARN="${FORCE_WARN} 错误或不兼容的固件配合 -F 选项极易导致设备变砖！\n"
+FORCE_WARN="${FORCE_WARN} 仅在您完全确定固件正确且了解风险时才应使用。\n"
+FORCE_WARN="${FORCE_WARN}!!!!!!!!!!!!!!!!!!!!!!!!!!!! 危 险 操 作 提 示 !!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+echo -e "$FORCE_WARN" # 显示 -F 风险警告
+read -p "是否要在本次升级中使用强制 '-F' 选项？ (y/N): " confirm_force
+if [[ "$confirm_force" =~ ^[Yy]$ ]]; then
+    echo "信息：用户选择使用强制 '-F' 选项进行升级。"
+    FORCE_FLAG="-F"
+    UPGRADE_INFO="${UPGRADE_INFO}\n*** 本次升级将强制执行 (-F 选项)！ ***\n"
+else
+    echo "信息：本次升级将不使用强制 '-F' 选项。"
+    FORCE_FLAG=""
+fi
 
+# --- 询问是否详细输出 (-v) ---
+VERBOSE_FLAG="" # -v 参数标志，默认为空
+read -p "是否要在本次升级中启用详细输出模式 '-v' (verbose)？ (y/N): " confirm_verbose
+if [[ "$confirm_verbose" =~ ^[Yy]$ ]]; then
+    echo "信息：用户选择启用详细输出模式 (-v)。"
+    VERBOSE_FLAG="-v"
+    UPGRADE_INFO="${UPGRADE_INFO}\n* 本次升级将启用详细输出 (-v 选项)。\n" # 在最终摘要中加入-v提示
+else
+    echo "信息：本次升级将不启用详细输出模式。"
+    VERBOSE_FLAG=""
+fi
+
+# --- 最终确认与执行 ---
+# 显示最终的升级信息摘要
 echo "---------------------------------------------------------------------"
 echo -e "警告：即将开始系统升级！"
-echo -e "$UPGRADE_INFO"
-echo -e "$FORCE_WARN" # *** 显示强制升级警告 ***
+echo -e "$UPGRADE_INFO" # 显示包含 -F 和 -v 状态的最终信息
 echo "警告：本次升级未进行文件完整性校验！"
 echo "升级过程中，请务必保持设备通电，不要中断操作！"
-if [ -z "$SYSUPGRADE_ARGS" ]; then
+if [ -z "$SYSUPGRADE_ARGS" ]; then # 只有在尝试保留配置时才强烈建议备份
     echo "建议提前备份重要数据。"
 fi
 echo "---------------------------------------------------------------------"
-# *** 修改确认提示，强调风险 ***
-read -p "您已阅读并完全理解强制升级 (-F) 的风险，确认要开始执行吗？ (y/N): " confirm_upgrade
+# Final confirmation
+read -p "确认要开始执行 sysupgrade 升级吗？ (y/N): " confirm_upgrade
 
 if [[ "$confirm_upgrade" =~ ^[Yy]$ ]]; then
-    # *** 修改点：明确提示正在使用 -F ***
+    # 构造最终执行信息
+    MSG_DESC="信息：正在执行 sysupgrade 命令 ("
+    FLAG_DESC=""
+    [ -n "$FORCE_FLAG" ] && FLAG_DESC="强制$FLAG_DESC"
+    [ -n "$VERBOSE_FLAG" ] && FLAG_DESC="${FLAG_DESC}${FLAG_DESC:+, }详细" # Add comma if needed
+
     if [ -z "$SYSUPGRADE_ARGS" ]; then
-        echo "信息：正在强制执行 sysupgrade 命令 (-F, 保留数据)..."
-    else # $SYSUPGRADE_ARGS is -n
-        echo "信息：正在强制执行 sysupgrade 命令 (-F, 不保留数据)..."
+        DATA_DESC="保留数据"
+    else
+        DATA_DESC="不保留数据"
     fi
-    # *** 修改点：在 sysupgrade 命令中添加 -F 参数 ***
-    sysupgrade -F $SYSUPGRADE_ARGS "$IMAGE_PATH_IMG"
+
+    if [ -n "$FLAG_DESC" ]; then
+         MSG_DESC="${MSG_DESC}${FLAG_DESC}, ${DATA_DESC})..."
+    else
+         MSG_DESC="${MSG_DESC}${DATA_DESC})..."
+    fi
+    echo "$MSG_DESC"
+
+    # *** 修改点：在 sysupgrade 命令中加入 $VERBOSE_FLAG ***
+    sysupgrade $FORCE_FLAG $VERBOSE_FLAG $SYSUPGRADE_ARGS "$IMAGE_PATH_IMG"
 
     echo "信息：sysupgrade 命令已执行。如果成功，系统将会重启。"
     exit 0
