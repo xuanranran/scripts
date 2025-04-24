@@ -17,44 +17,41 @@ cleanup() {
 trap cleanup EXIT
 
 # --- 设置：如果任何命令失败则退出 ---
-# Temporarily disable set -e during dependency checks/installs
-# set -e
+set -e
 
-# --- 1. 检查并尝试安装依赖项 (自动检测 opkg 或 apk) ---
-echo "INFO: Checking and attempting to install required tools (wget, jq, gunzip)..."
-echo "      Note: This requires root privileges and internet access."
+# --- 1. 检查依赖项 (自动检测 opkg 或 apk, 但不安装) ---
+echo "INFO: Checking required tools (wget, jq, gunzip)..."
 
 PKG_MANAGER=""
-UPDATE_CMD=""
-INSTALL_CMD=""
-PACKAGES_TO_INSTALL=""
+INSTALL_CMD_VERB="" # e.g., "install" or "add"
+UPDATE_CMD_EXAMPLE="" # e.g., "opkg update" or "apk update"
 
 # Detect package manager
 if command -v opkg >/dev/null 2>&1; then
     echo "INFO: Detected 'opkg' package manager (Standard OpenWrt)."
     PKG_MANAGER="opkg"
-    UPDATE_CMD="opkg update"
-    INSTALL_CMD="opkg install"
+    INSTALL_CMD_VERB="install"
+    UPDATE_CMD_EXAMPLE="opkg update"
 elif command -v apk >/dev/null 2>&1; then
     echo "INFO: Detected 'apk' package manager (Alpine/Recent OpenWrt Snapshot?)."
     PKG_MANAGER="apk"
-    UPDATE_CMD="apk update"
-    INSTALL_CMD="apk add" # apk uses 'add'
+    INSTALL_CMD_VERB="add" # apk uses 'add'
+    UPDATE_CMD_EXAMPLE="apk update"
 else
     echo >&2 "错误：无法检测到 'opkg' 或 'apk' 包管理器。"
     echo >&2 "请确保其中一个已安装并位于 PATH 中，或手动安装依赖项 (wget, jq, gzip)。"
     exit 1
 fi
 
-update_run=0 # Flag to track if update command has been run
-
-# --- Define required packages and check ---
-# Package names happen to be the same for opkg and apk in this case
-required_pkgs_map=( ["wget"]="wget" ["jq"]="jq" ["gunzip"]="gzip" ) # Command -> Package Name
-missing_pkgs=()
+# --- Define required commands and check ---
+# Maps required command -> package name providing it
+required_pkgs_map=( ["wget"]="wget" ["jq"]="jq" ["gunzip"]="gzip" )
+missing_pkgs=() # List of package names to install
+missing_cmds=() # List of commands not found
 
 for cmd in "${!required_pkgs_map[@]}"; do
     if ! command -v $cmd >/dev/null 2>&1; then
+        missing_cmds+=("$cmd") # Add the command that wasn't found
         pkg_name=${required_pkgs_map[$cmd]}
         # Add package name to list only if not already added
         if ! [[ " ${missing_pkgs[@]} " =~ " ${pkg_name} " ]]; then
@@ -63,46 +60,20 @@ for cmd in "${!required_pkgs_map[@]}"; do
     fi
 done
 
-# --- Attempt to install missing packages ---
+# --- Report missing packages and exit ---
 if [ ${#missing_pkgs[@]} -gt 0 ]; then
-    echo "INFO: Missing required packages for commands: ${missing_pkgs[*]}"
-    echo "INFO: Attempting to install using '$PKG_MANAGER'..."
+    # Convert arrays to space-separated strings for printing
+    missing_cmds_str=$(IFS=" "; echo "${missing_cmds[*]}")
+    missing_pkgs_str=$(IFS=" "; echo "${missing_pkgs[*]}")
 
-    # Run update command once
-    if [ "$update_run" -eq 0 ]; then
-        echo "INFO: Running package list update ($UPDATE_CMD)..."
-        $UPDATE_CMD
-        if [ $? -ne 0 ]; then
-             echo "警告：包列表更新命令 '$UPDATE_CMD' 失败，但仍将尝试安装..."
-        fi
-        update_run=1
-    fi
-
-    # Install missing packages
-    echo "INFO: Running install command ($INSTALL_CMD ${missing_pkgs[*]})..."
-    $INSTALL_CMD ${missing_pkgs[*]}
-
-    # Re-check all dependencies after install attempt
-    echo "INFO: Re-checking dependencies after installation attempt..."
-    final_missing_cmds=()
-    for cmd in "${!required_pkgs_map[@]}"; do
-        if ! command -v $cmd >/dev/null 2>&1; then
-            final_missing_cmds+=("$cmd")
-        fi
-    done
-
-    if [ ${#final_missing_cmds[@]} -gt 0 ]; then
-         echo >&2 "错误：安装依赖项失败。仍然缺失命令: ${final_missing_cmds[*]}"
-         echo >&2 "请检查网络连接、包管理器配置 ($PKG_MANAGER)，并尝试手动安装。"
-         exit 1
-     else
-         echo "INFO: All required packages installed successfully."
-     fi
+    echo >&2 "错误：脚本运行缺少必要的命令: ${missing_cmds_str}"
+    echo >&2 "检测到包管理器为 '$PKG_MANAGER'。请安装对应的包: ${missing_pkgs_str}"
+    # Provide the example install command
+    echo >&2 "请运行: ${UPDATE_CMD_EXAMPLE} && ${PKG_MANAGER} ${INSTALL_CMD_VERB} ${missing_pkgs_str}"
+    exit 1
 fi
 
 echo "INFO: All required dependencies are available."
-# Re-enable set -e for subsequent steps if strict error checking is desired
-set -e
 
 # --- 2. 临时增大 /tmp 分区 ---
 echo "INFO: 尝试临时将 /tmp 重新挂载为更大内存（RAM 的 100%）。.."
@@ -160,6 +131,7 @@ echo "警告：已跳过文件完整性校验！请自行承担风险。"
 echo "---------------------------------------------------------------------"
 echo "警告：即将开始系统升级！"
 echo "      假定 'sysupgrade' 仍然是适用于此系统的升级命令。"
+echo "      (如果你的系统基于 apk 且升级方式已改变，请勿继续！)"
 echo "将使用以下 *解压后* 的固件文件进行升级："
 echo "$IMAGE_PATH_IMG"
 echo ""
