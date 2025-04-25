@@ -24,20 +24,24 @@ THRESHOLD_KIB=614400                                                       # 保
 
 # --- 退出脚本时清理临时文件 ---
 cleanup() {
+  # 这个函数会在脚本退出时执行，清理本次运行产生的文件
   echo # 清理前空一行
-  echo -e "${C_BLUE}信息：${C_RESET}正在清理临时文件..."
+  echo -e "${C_BLUE}信息：${C_RESET}正在清理本次运行时产生的临时文件..."
   rm -f "$IMAGE_PATH_GZ" "$IMAGE_PATH_IMG" "$CHECKSUM_PATH"
 }
-# trap cleanup EXIT #升级成功不会执行
-
-# --- 清理文件 ---
-clean_up () {
-    rm -rf "$IMAGE_PATH_GZ" "$IMAGE_PATH_IMG" "$CHECKSUM_PATH" *.img* $TMP_DIR/*.img* *update*.sh* *upgrade*.sh*
-}
+# 设置陷阱：当脚本退出时（EXIT信号），执行 cleanup 函数
+# trap cleanup EXIT # 升级成功不会执行
 
 # --- 设置：如果任何命令失败则立即退出 ---
 # 在依赖项安装/检查步骤中会临时禁用此设置
 # set -e
+
+# *** 新增：脚本运行时首先清理旧的临时固件文件 ***
+echo
+echo -e "${C_BLUE}信息：${C_RESET}正在清理 /tmp 目录中可能存在的旧固件或校验文件..."
+rm -f "$IMAGE_PATH_GZ" "$IMAGE_PATH_IMG" "$CHECKSUM_PATH"
+echo -e "${C_BLUE}信息：${C_RESET}旧文件清理完成。"
+# *** 清理结束 ***
 
 echo
 echo -e "${C_BLUE}=====================================================================${C_RESET}"
@@ -143,7 +147,7 @@ echo -e "${C_BLUE}信息：${C_RESET}正在收集当前系统信息..."
 echo
 
 # 型号/主板信息
-echo -e "${C_CYAN}>> 设备型号/主板信息:${C_RESET}" # 标题保留颜色
+echo -e "${C_CYAN}>> 设备型号/主板信息:${C_RESET}"
 model_info_found=0
 if [ $UBUS_PRESENT -eq 1 ]; then
     ubus_output=$(ubus call system board 2>/dev/null)
@@ -152,22 +156,20 @@ if [ $UBUS_PRESENT -eq 1 ]; then
         board=$(echo "$ubus_output" | jq -r '.board_name // empty')
         if [ -n "$model" ] || [ -n "$board" ]; then
              echo "  来源: ubus"
-             # *** 修改点：移除此处的颜色代码 ***
              [ -n "$model" ] && echo "    型号: $model"
              [ -n "$board" ] && echo "    主板: $board"
              model_info_found=1
         else
-             echo -e "  ${C_YELLOW}(ubus 未返回有效型号/主板信息)${C_RESET}" # 警告保留颜色
+             echo -e "  ${C_YELLOW}(ubus 未返回有效型号/主板信息)${C_RESET}"
         fi
     else
-         echo -e "  ${C_YELLOW}(ubus 命令执行失败或无输出)${C_RESET}" # 警告保留颜色
+         echo -e "  ${C_YELLOW}(ubus 命令执行失败或无输出)${C_RESET}"
     fi
 fi
 if [ $model_info_found -eq 0 ] && [ -f /tmp/sysinfo/model ]; then
     model_sysinfo=$(cat /tmp/sysinfo/model)
     if [ -n "$model_sysinfo" ]; then
         echo "  来源: /tmp/sysinfo/model"
-        # *** 修改点：移除此处的颜色代码 ***
         echo "    型号: $model_sysinfo"
         model_info_found=1
     fi
@@ -176,39 +178,38 @@ if [ $model_info_found -eq 0 ] && [ -r /proc/device-tree/model ]; then
      model_dt=$(cat /proc/device-tree/model 2>/dev/null | tr -d '\0')
      if [ -n "$model_dt" ]; then
          echo "  来源: /proc/device-tree/model"
-         # *** 修改点：移除此处的颜色代码 ***
          echo "    型号: $model_dt"
          model_info_found=1
      fi
 fi
 if [ $model_info_found -eq 0 ]; then
-    echo -e "  ${C_YELLOW}无法自动确定设备型号或主板名称。${C_RESET}" # 警告保留颜色
+    echo -e "  ${C_YELLOW}无法自动确定设备型号或主板名称。${C_RESET}"
 fi
 echo
 
 # CPU 信息 (简化)
-echo -e "${C_CYAN}>> CPU:${C_RESET}" # 标题保留颜色
-grep 'model name' /proc/cpuinfo | head -n1 | sed 's/^model name[[:space:]]*: /  /' || echo -e "  ${C_YELLOW}无法获取 CPU 型号。${C_RESET}" # 警告保留颜色
+echo -e "${C_CYAN}>> CPU:${C_RESET}"
+grep 'model name' /proc/cpuinfo | head -n1 | sed 's/^model name[[:space:]]*: /  /' || echo -e "  ${C_YELLOW}无法获取 CPU 型号。${C_RESET}"
 echo
 
 # 内存信息
-echo -e "${C_CYAN}>> 内存信息:${C_RESET}" # 标题保留颜色
+echo -e "${C_CYAN}>> 内存信息:${C_RESET}"
 if command -v free >/dev/null 2>&1; then
-    free -h | sed 's/^/  /' # 输出保留默认颜色
+    free -h | sed 's/^/  /'
 else
-    echo -e "  ${C_YELLOW}(未找到 free 命令，尝试读取 /proc/meminfo)${C_RESET}" # 警告保留颜色
-    grep -E 'MemTotal|MemFree|MemAvailable' /proc/meminfo | sed 's/^/  /' || echo -e "  ${C_YELLOW}无法获取内存信息。${C_RESET}" # 警告保留颜色
+    echo -e "  ${C_YELLOW}(未找到 free 命令，尝试读取 /proc/meminfo)${C_RESET}"
+    grep -E 'MemTotal|MemFree|MemAvailable' /proc/meminfo | sed 's/^/  /' || echo -e "  ${C_YELLOW}无法获取内存信息。${C_RESET}"
 fi
 echo
 
 # 磁盘分区和挂载点信息 (lsblk)
-echo -e "${C_CYAN}>> 磁盘分区布局 (lsblk):${C_RESET}" # 标题保留颜色
-lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT 2>/dev/null | sed 's/^/  /' || echo -e "  ${C_YELLOW}警告：${C_RESET}'lsblk' 命令执行失败或未安装。" # 警告保留颜色
+echo -e "${C_CYAN}>> 磁盘分区布局 (lsblk):${C_RESET}"
+lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT 2>/dev/null | sed 's/^/  /' || echo -e "  ${C_YELLOW}警告：${C_RESET}'lsblk' 命令执行失败或未安装。"
 echo
 
 # 文件系统使用情况和类型 (df)
-echo -e "${C_CYAN}>> 文件系统使用情况 (df -hT):${C_RESET}" # 标题保留颜色
-df -hT | sed 's/^/  /' || echo -e "  ${C_YELLOW}无法获取文件系统使用情况。${C_RESET}" # 警告保留颜色
+echo -e "${C_CYAN}>> 文件系统使用情况 (df -hT):${C_RESET}"
+df -hT | sed 's/^/  /' || echo -e "  ${C_YELLOW}无法获取文件系统使用情况。${C_RESET}"
 echo
 
 echo -e "${C_BLUE}--- 步骤 2 完成 ---${C_RESET}"
@@ -247,7 +248,7 @@ CHECKSUM_URL=$(echo "$RELEASE_INFO" | jq -r --arg NAME "$CHECKSUM_FILENAME" '.as
 SKIP_CHECKSUM=0
 if [ -z "$IMAGE_URL" ] || [ "$IMAGE_URL" == "null" ]; then echo -e "${C_B_RED}错误：${C_RESET}在版本 '${C_YELLOW}${RELEASE_TAG}${C_RESET}' 中未找到固件文件 '${C_RED}${IMAGE_FILENAME_GZ}${C_RESET}'。" >&2; exit 1; fi
 echo -e "${C_BLUE}信息：${C_RESET}找到固件下载链接: ${C_CYAN}${IMAGE_URL}${C_RESET}"
-if [ -z "$CHECKSUM_URL" ] || [ "$CHECKSUM_URL" == "null" ]; then echo -e "${C_YELLOW}警告：${C_RESET}未找到校验文件 '${C_YELLOW}${CHECKSUM_FILENAME}${C_RESET}'，将跳过校验。"; SKIP_CHECKSUM=1; else echo -e "${C_BLUE}信息：${C_RESET}找到校验文件下载链接: ${C_CYAN}${CHECKSUM_URL}${C_RESET}"; fi
+if [ -z "$CHECKSUM_URL" ] || [ "$CHECKSUM_URL" == "null" ]; then echo -e "${C_YELLOW}警告：${C_RESET}未找到校验文件 '${C_YELLOW}${CHECKSUM_FILENAME}${C_RESET}'，将【自动跳过】文件完整性校验。"; SKIP_CHECKSUM=1; else echo -e "${C_BLUE}信息：${C_RESET}找到校验文件下载链接: ${C_CYAN}${CHECKSUM_URL}${C_RESET}"; fi
 echo -e "${C_BLUE}--- 步骤 5 完成 ---${C_RESET}"
 echo
 
@@ -282,28 +283,36 @@ fi
 echo -e "${C_BLUE}--- 步骤 7 完成 ---${C_RESET}"
 echo
 
-# --- 8. 校验固件完整性 ---
+# --- 8. 校验固件完整性 (询问是否执行) ---
 echo -e "${C_BLUE}--- 步骤 8: 校验固件完整性 (SHA256) ---${C_RESET}"
 if [ $SKIP_CHECKSUM -eq 1 ]; then
-    echo -e "${C_YELLOW}信息：跳过文件完整性校验。${C_RESET}"
+    echo -e "${C_YELLOW}信息：由于之前步骤未能找到或下载校验文件，跳过文件完整性校验。${C_RESET}"
 else
-    echo -e "${C_BLUE}信息：${C_RESET}正在校验文件 '${C_CYAN}${IMAGE_FILENAME_GZ}${C_RESET}' 的 SHA256 哈希值..."
-    EXPECTED_SUM=$(grep "$IMAGE_FILENAME_GZ" "$CHECKSUM_PATH" | awk '{print $1}')
-    if [ -z "$EXPECTED_SUM" ]; then
-         echo -e "${C_YELLOW}警告：${C_RESET}在校验文件 '${C_YELLOW}${CHECKSUM_FILENAME}${C_RESET}' 中未能找到固件 '${C_YELLOW}${IMAGE_FILENAME_GZ}${C_RESET}' 的校验信息。跳过校验。"
-         SKIP_CHECKSUM=1
+    echo # 添加空行让提示更清晰
+    read -p "$(echo -e "${C_YELLOW}❓ 是否需要执行 SHA256 固件完整性校验？ (Y/n): ${C_RESET}")" confirm_run_checksum
+
+    if [[ "$confirm_run_checksum" =~ ^[Nn]$ ]]; then
+        echo -e "${C_YELLOW}信息：用户选择跳过文件完整性校验。${C_RESET}"
+        SKIP_CHECKSUM=1 # 用户选择跳过
     else
-        CALCULATED_SUM=$(sha256sum "$IMAGE_PATH_GZ" | awk '{print $1}')
-        echo -e "  >> ${C_BLUE}期望 SHA256:${C_RESET} ${EXPECTED_SUM}"
-        echo -e "  >> ${C_BLUE}计算 SHA256:${C_RESET} ${CALCULATED_SUM}"
-        if [ "$EXPECTED_SUM" == "$CALCULATED_SUM" ]; then
-            echo -e "${C_B_GREEN}✅ 校验成功！文件完整。${C_RESET}"
+        echo -e "${C_BLUE}信息：${C_RESET}正在校验文件 '${C_CYAN}${IMAGE_FILENAME_GZ}${C_RESET}' 的 SHA256 哈希值..."
+        EXPECTED_SUM=$(grep "$IMAGE_FILENAME_GZ" "$CHECKSUM_PATH" | awk '{print $1}')
+        if [ -z "$EXPECTED_SUM" ]; then
+             echo -e "${C_YELLOW}警告：${C_RESET}在校验文件 '${C_YELLOW}${CHECKSUM_FILENAME}${C_RESET}' 中未能找到固件 '${C_YELLOW}${IMAGE_FILENAME_GZ}${C_RESET}' 的校验信息。跳过校验。"
+             SKIP_CHECKSUM=1
         else
-            echo; echo -e "${C_B_RED}❌ 错误：SHA256 校验和不匹配！文件可能已损坏或不完整。${C_RESET}"; echo
-            read -p "$(echo -e "${C_B_YELLOW}❓ 警告：文件校验失败！是否仍要继续升级？(y/N): ${C_RESET}")" confirm_checksum
-            if [[ ! "$confirm_checksum" =~ ^[Yy]$ ]]; then echo -e "${C_YELLOW}操作中止。${C_RESET}"; exit 1; fi
-            echo -e "${C_YELLOW}信息：用户选择忽略校验失败并继续。${C_RESET}"
-            SKIP_CHECKSUM=1
+            CALCULATED_SUM=$(sha256sum "$IMAGE_PATH_GZ" | awk '{print $1}')
+            echo -e "  >> ${C_BLUE}期望 SHA256:${C_RESET} ${EXPECTED_SUM}"
+            echo -e "  >> ${C_BLUE}计算 SHA256:${C_RESET} ${CALCULATED_SUM}"
+            if [ "$EXPECTED_SUM" == "$CALCULATED_SUM" ]; then
+                echo -e "${C_B_GREEN}✅ 校验成功！文件完整。${C_RESET}"
+            else
+                echo; echo -e "${C_B_RED}❌ 错误：SHA256 校验和不匹配！文件可能已损坏或不完整。${C_RESET}"; echo
+                read -p "$(echo -e "${C_B_YELLOW}❓ 警告：文件校验失败！是否仍要继续升级？(y/N): ${C_RESET}")" confirm_checksum_fail
+                if [[ ! "$confirm_checksum_fail" =~ ^[Yy]$ ]]; then echo -e "${C_YELLOW}操作中止。${C_RESET}"; exit 1; fi
+                echo -e "${C_YELLOW}信息：用户选择忽略校验失败并继续。${C_RESET}"
+                SKIP_CHECKSUM=1
+            fi
         fi
     fi
 fi
