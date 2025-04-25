@@ -15,7 +15,7 @@ C_B_YELLOW='\033[1;33m'   # 粗体黄色
 REPO="xuanranran/OpenWRT-X86_64"                                           # 目标 GitHub 仓库
 IMAGE_FILENAME_GZ="immortalwrt-x86-64-generic-squashfs-combined-efi.img.gz" # 压缩固件的文件名
 IMAGE_FILENAME_IMG="${IMAGE_FILENAME_GZ%.gz}"                             # 解压后的固件文件名
-CHECKSUM_FILENAME="sha256sums"                                             # *** 修改点：校验和文件名 (无 .txt 后缀) ***
+CHECKSUM_FILENAME="sha256sums"                                             # 校验和文件名 (无 .txt 后缀)
 TMP_DIR="/tmp"                                                             # 临时文件目录
 IMAGE_PATH_GZ="$TMP_DIR/$IMAGE_FILENAME_GZ"                                # 压缩固件的完整路径
 IMAGE_PATH_IMG="$TMP_DIR/$IMAGE_FILENAME_IMG"                              # 解压后固件的完整路径
@@ -45,7 +45,7 @@ echo -e "${C_BLUE} OpenWRT/ImmortalWrt 自动升级脚本 ${C_RESET}"
 echo -e "${C_BLUE}=====================================================================${C_RESET}"
 echo
 
-# --- 1. 检查并尝试安装依赖项 (添加 lsblk) ---
+# --- 1. 检查并尝试安装依赖项 ---
 echo -e "${C_BLUE}--- 步骤 1: 检查并尝试安装依赖项 ---${C_RESET}"
 echo -e "${C_BLUE}信息：${C_RESET}检查所需工具 (wget, jq, gunzip, awk, sha256sum, lsblk)..."
 
@@ -142,21 +142,55 @@ echo -e "${C_BLUE}--- 步骤 2: 显示系统和磁盘信息 ---${C_RESET}"
 echo -e "${C_BLUE}信息：${C_RESET}正在收集当前系统信息..."
 echo
 
-# 型号/主板信息
+# *** 修改点：优化型号/主板信息获取逻辑 ***
 echo -e "${C_CYAN}>> 设备型号/主板信息:${C_RESET}"
+model_info_found=0
 if [ $UBUS_PRESENT -eq 1 ]; then
-    ubus call system board 2>/dev/null | jq -r '"  型号: \(.model)\n  主板: \(.board_name)"' || echo -e "  ${C_YELLOW}(使用 ubus 获取信息失败，尝试其他方法...)${C_RESET}"
-elif [ -f /tmp/sysinfo/model ]; then
-    echo "  型号 (来自 sysinfo): $(cat /tmp/sysinfo/model)"
-else
-    echo -e "  ${C_YELLOW}无法获取准确的设备型号或主板信息。${C_RESET}"
+    # 尝试用 ubus (首选方法)
+    ubus_output=$(ubus call system board 2>/dev/null)
+    if [ -n "$ubus_output" ]; then
+        # 使用 jq 提取 model 和 board_name, 如果不存在则为空
+        model=$(echo "$ubus_output" | jq -r '.model // empty')
+        board=$(echo "$ubus_output" | jq -r '.board_name // empty')
+        # 只有当提取到的 model 或 board 不为空时才显示
+        if [ -n "$model" ] || [ -n "$board" ]; then
+             echo "  来源: ubus"
+             [ -n "$model" ] && echo "    型号: ${C_GREEN}${model}${C_RESET}"
+             [ -n "$board" ] && echo "    主板: ${C_GREEN}${board}${C_RESET}"
+             model_info_found=1
+        else
+             echo -e "  ${C_YELLOW}(ubus 未返回有效型号/主板信息)${C_RESET}"
+        fi
+    else
+         echo -e "  ${C_YELLOW}(ubus 命令执行失败或无输出)${C_RESET}"
+    fi
+fi
+
+if [ $model_info_found -eq 0 ] && [ -f /tmp/sysinfo/model ]; then
+    # 备选方法 1: /tmp/sysinfo/model
+    model_sysinfo=$(cat /tmp/sysinfo/model)
+    if [ -n "$model_sysinfo" ]; then
+        echo "  来源: /tmp/sysinfo/model"
+        echo "    型号: ${C_GREEN}${model_sysinfo}${C_RESET}"
+        model_info_found=1
+    fi
+fi
+
+if [ $model_info_found -eq 0 ] && [ -r /proc/device-tree/model ]; then
+    # 备选方法 2: /proc/device-tree/model (适用于某些设备, 特别是 ARM)
+     model_dt=$(cat /proc/device-tree/model 2>/dev/null | tr -d '\0') # 读取并移除可能的 null 字节
+     if [ -n "$model_dt" ]; then
+         echo "  来源: /proc/device-tree/model"
+         echo "    型号: ${C_GREEN}${model_dt}${C_RESET}"
+         model_info_found=1
+     fi
+fi
+
+if [ $model_info_found -eq 0 ]; then
+    # 如果以上方法都失败
+    echo -e "  ${C_YELLOW}无法自动确定设备型号或主板名称。${C_RESET}"
 fi
 echo
-
-# *** 修改点：移除 CPU 信息显示 ***
-# echo -e "${C_CYAN}>> CPU 信息:${C_RESET}"
-# grep 'model name' /proc/cpuinfo | head -n1 | sed 's/^model name[[:space:]]*: /  CPU: /' || echo -e "  ${C_YELLOW}无法获取 CPU 型号。${C_RESET}"
-# echo
 
 # 内存信息
 echo -e "${C_CYAN}>> 内存信息:${C_RESET}"
@@ -207,15 +241,13 @@ echo
 
 # --- 5. 查找固件和校验文件 URL ---
 echo -e "${C_BLUE}--- 步骤 5: 查找文件 URL ---${C_RESET}"
-# *** 修改点：CHECKSUM_FILENAME 变量已在顶部修改，这里的消息会自动使用新名称 ***
 echo -e "${C_BLUE}信息：${C_RESET}正在查找固件 '${C_CYAN}${IMAGE_FILENAME_GZ}${C_RESET}' 和校验文件 '${C_CYAN}${CHECKSUM_FILENAME}${C_RESET}'..."
 IMAGE_URL=$(echo "$RELEASE_INFO" | jq -r --arg NAME "$IMAGE_FILENAME_GZ" '.assets[] | select(.name==$NAME) | .browser_download_url')
-CHECKSUM_URL=$(echo "$RELEASE_INFO" | jq -r --arg NAME "$CHECKSUM_FILENAME" '.assets[] | select(.name==$NAME) | .browser_download_url') # 使用更新后的变量
+CHECKSUM_URL=$(echo "$RELEASE_INFO" | jq -r --arg NAME "$CHECKSUM_FILENAME" '.assets[] | select(.name==$NAME) | .browser_download_url')
 
 SKIP_CHECKSUM=0
 if [ -z "$IMAGE_URL" ] || [ "$IMAGE_URL" == "null" ]; then echo -e "${C_B_RED}错误：${C_RESET}在版本 '${C_YELLOW}${RELEASE_TAG}${C_RESET}' 中未找到固件文件 '${C_RED}${IMAGE_FILENAME_GZ}${C_RESET}'。" >&2; exit 1; fi
 echo -e "${C_BLUE}信息：${C_RESET}找到固件下载链接: ${C_CYAN}${IMAGE_URL}${C_RESET}"
-# *** 修改点：这里的消息会自动使用更新后的 CHECKSUM_FILENAME 变量 ***
 if [ -z "$CHECKSUM_URL" ] || [ "$CHECKSUM_URL" == "null" ]; then echo -e "${C_YELLOW}警告：${C_RESET}未找到校验文件 '${C_YELLOW}${CHECKSUM_FILENAME}${C_RESET}'，将跳过校验。"; SKIP_CHECKSUM=1; else echo -e "${C_BLUE}信息：${C_RESET}找到校验文件下载链接: ${C_CYAN}${CHECKSUM_URL}${C_RESET}"; fi
 echo -e "${C_BLUE}--- 步骤 5 完成 ---${C_RESET}"
 echo
@@ -241,7 +273,6 @@ echo -e "${C_B_GREEN}信息：${C_RESET}压缩固件下载完成。"
 
 # 下载校验文件
 if [ $SKIP_CHECKSUM -eq 0 ]; then
-    # *** 修改点：这里的消息会自动使用更新后的 CHECKSUM_FILENAME 变量 ***
     echo -e "${C_BLUE}信息：${C_RESET}正在下载校验文件 '${C_CYAN}${CHECKSUM_FILENAME}${C_RESET}' 到 '${C_CYAN}${CHECKSUM_PATH}${C_RESET}' ..."
     set +e; wget -q --no-check-certificate -O "$CHECKSUM_PATH" "$CHECKSUM_URL"; dl_status=$?; set -e
     if [ $dl_status -ne 0 ]; then
@@ -258,10 +289,8 @@ if [ $SKIP_CHECKSUM -eq 1 ]; then
     echo -e "${C_YELLOW}信息：跳过文件完整性校验。${C_RESET}"
 else
     echo -e "${C_BLUE}信息：${C_RESET}正在校验文件 '${C_CYAN}${IMAGE_FILENAME_GZ}${C_RESET}' 的 SHA256 哈希值..."
-    # grep 在校验文件中查找固件文件名，这部分不需要改
     EXPECTED_SUM=$(grep "$IMAGE_FILENAME_GZ" "$CHECKSUM_PATH" | awk '{print $1}')
     if [ -z "$EXPECTED_SUM" ]; then
-         # *** 修改点：这里的消息会自动使用更新后的 CHECKSUM_FILENAME 变量 ***
          echo -e "${C_YELLOW}警告：${C_RESET}在校验文件 '${C_YELLOW}${CHECKSUM_FILENAME}${C_RESET}' 中未能找到固件 '${C_YELLOW}${IMAGE_FILENAME_GZ}${C_RESET}' 的校验信息。跳过校验。"
          SKIP_CHECKSUM=1
     else
