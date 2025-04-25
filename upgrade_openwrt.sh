@@ -29,7 +29,7 @@ cleanup() {
   rm -f "$IMAGE_PATH_GZ" "$IMAGE_PATH_IMG" "$CHECKSUM_PATH" # 清理压缩包、解压后的文件和校验文件
 }
 # 设置陷阱：当脚本退出时（EXIT信号），执行 cleanup 函数
-trap cleanup EXIT
+# trap cleanup EXIT
 
 # --- 设置：如果任何命令失败则立即退出 ---
 # 在依赖项安装步骤中会临时禁用此设置
@@ -312,7 +312,7 @@ UPGRADE_INFO="${UPGRADE_INFO}${VERBOSE_FLAG_INFO}"
 # --- 最终确认与执行 ---
 echo
 echo -e "${C_BLUE}========================= 升 级 前 最 终 确 认 ========================${C_RESET}"
-echo -e "$UPGRADE_INFO"
+echo -e "$UPGRADE_INFO" # 显示包含所有选项状态的最终信息
 if [ -z "$SYSUPGRADE_ARGS" ]; then echo -e "${C_YELLOW}建议提前备份重要数据。${C_RESET}\n"; fi
 echo -e "${C_B_YELLOW}升级过程中，请务必保持设备通电，不要中断操作！${C_RESET}"
 echo -e "${C_BLUE}=====================================================================${C_RESET}"
@@ -335,14 +335,13 @@ if [[ "$confirm_upgrade" =~ ^[Yy]$ ]]; then
 
     echo # 换行
     echo -e "${C_B_GREEN}✅ 信息：sysupgrade 命令已执行。如果成功，系统将会重启。${C_RESET}"
-    echo -e "${C_BLUE}信息：${C_RESET}禁用临时文件清理陷阱，因为升级已启动。"
-    # *** 修改点：禁用 EXIT 陷阱 ***
-    trap - EXIT
-    exit 0 # 正常退出，此时 cleanup 不会执行
+    # *** 修改点：确保 trap cleanup EXIT 仍然有效 ***
+    # trap - EXIT # 这一行已被移除，确保 cleanup 会执行
+    exit 0 # 正常退出，此时 cleanup 会被执行
 else
     echo # 换行
     echo -e "${C_YELLOW}操作已取消。${C_RESET}解压后的固件文件保留在 '${C_CYAN}${IMAGE_PATH_IMG}${C_RESET}'，您可以手动升级或删除它。"
-    # 注意：此路径退出时，cleanup 仍然会被执行
+    # 此路径退出时，cleanup 也会被执行
     exit 0
 fi
 
