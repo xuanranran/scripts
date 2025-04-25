@@ -12,12 +12,17 @@ CHECKSUM_PATH="$TMP_DIR/$CHECKSUM_FILENAME"                                # 校
 THRESHOLD_KIB=1887437                                                      # 保留数据的空间阈值 (1.8 GiB in KiB)
 
 # --- 退出脚本时清理临时文件 ---
-cleanup() {
-  echo "信息：正在清理临时文件..."
-  # 清理压缩包、解压后的文件和校验文件
-  rm -f "$IMAGE_PATH_GZ" "$IMAGE_PATH_IMG" "$CHECKSUM_PATH"
+# cleanup() {
+  # echo "信息：正在清理临时文件..."
+  清理压缩包、解压后的文件和校验文件
+  # rm -f "$IMAGE_PATH_GZ" "$IMAGE_PATH_IMG" "$CHECKSUM_PATH"
+# }
+# trap cleanup EXIT
+
+#清理文件
+clean_up () {
+    rm -rf *.img* ${img_path}/*.img* *sha256sums* *update*.sh*
 }
-trap cleanup EXIT
 
 # --- 设置：如果任何命令失败则立即退出 ---
 # 在依赖项安装步骤中会临时禁用此设置
