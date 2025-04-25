@@ -10,10 +10,10 @@ IMAGE_PATH_IMG="$TMP_DIR/$IMAGE_FILENAME_IMG"                              # 解
 THRESHOLD_KIB=1887437                                                      # 保留数据的空间阈值 (1.8 GiB in KiB)
 
 # --- 退出脚本时清理临时文件 ---
-# cleanup() {
-  # echo "信息：正在清理临时文件..."
-  # rm -f "$IMAGE_PATH_GZ" "$IMAGE_PATH_IMG" # 清理压缩包和解压后的文件
-# }
+cleanup() {
+  echo "信息：正在清理临时文件..."
+  rm -f "$IMAGE_PATH_GZ" "$IMAGE_PATH_IMG" # 清理压缩包和解压后的文件
+}
 # trap cleanup EXIT
 
 # --- 设置：如果任何命令失败则立即退出 ---
