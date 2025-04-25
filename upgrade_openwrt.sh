@@ -23,17 +23,13 @@ CHECKSUM_PATH="$TMP_DIR/$CHECKSUM_FILENAME"                                # 校
 THRESHOLD_KIB=1887437                                                      # 保留数据的空间阈值 (1.8 GiB in KiB)
 
 # --- 退出脚本时清理临时文件 ---
-# cleanup() {
-  # echo # 清理前空一行
-  # echo -e "${C_BLUE}信息：${C_RESET}正在清理临时文件..."
-  # rm -f "$IMAGE_PATH_GZ" "$IMAGE_PATH_IMG" "$CHECKSUM_PATH"
-# }
-# trap cleanup EXIT
-
-#清理文件
-clean_up () {
-    rm -rf *.img* ${img_path}/*.img* *sha256sums* *update*.sh*
+cleanup() {
+  echo # 清理前空一行
+  echo -e "${C_BLUE}信息：${C_RESET}正在清理临时文件..."
+  rm -f "$IMAGE_PATH_GZ" "$IMAGE_PATH_IMG" "$CHECKSUM_PATH" # 清理压缩包、解压后的文件和校验文件
 }
+# 设置陷阱：当脚本退出时（EXIT信号），执行 cleanup 函数
+trap cleanup EXIT
 
 # --- 设置：如果任何命令失败则立即退出 ---
 # 在依赖项安装步骤中会临时禁用此设置
@@ -179,7 +175,6 @@ echo -e "  固件链接: ${C_CYAN}${IMAGE_URL}${C_RESET}"
 if [ $SKIP_CHECKSUM -eq 1 ]; then echo -e "  校验文件: ${C_YELLOW}未找到${C_RESET}"; else echo -e "  校验链接: ${C_CYAN}${CHECKSUM_URL}${C_RESET}"; fi
 echo -e "  目标路径: ${C_CYAN}${IMAGE_PATH_GZ}${C_RESET}"
 echo "---------------------------------------------------------------------"
-# 使用 command substitution 来给 read -p 的提示加上颜色
 read -p "$(echo -e "${C_YELLOW}❓ 是否开始下载此固件文件？ (y/N): ${C_RESET}")" confirm_download
 if [[ ! "$confirm_download" =~ ^[Yy]$ ]]; then echo -e "${C_YELLOW}操作已取消，未下载固件。${C_RESET}"; exit 0; fi
 echo
@@ -277,19 +272,9 @@ echo
 
 # --- 10. 询问可选参数并最终确认 ---
 echo -e "${C_BLUE}--- 步骤 10: 配置可选参数并最终确认 ---${C_RESET}"
-# 设置关于数据保留的基本提示信息
-UPGRADE_INFO="将使用以下固件文件进行升级：\n  >> ${C_CYAN}${IMAGE_PATH_IMG}${C_RESET}\n\n" # 增加缩进
-if [ "$SYSUPGRADE_ARGS" == "-n" ]; then
-    UPGRADE_INFO="${UPGRADE_INFO}升级模式:\n  >> ${C_YELLOW}不保留配置数据${C_RESET} (使用 -n 选项)\n"
-else
-    UPGRADE_INFO="${UPGRADE_INFO}升级模式:\n  >> ${C_GREEN}尝试保留配置数据${C_RESET}\n"
-fi
-# 添加校验状态信息
-if [ $SKIP_CHECKSUM -eq 1 ]; then
-    UPGRADE_INFO="${UPGRADE_INFO}\n文件校验:\n  >> ${C_YELLOW}跳过或未执行${C_RESET}\n"
-else
-     UPGRADE_INFO="${UPGRADE_INFO}\n文件校验:\n  >> ${C_GREEN}SHA256 校验通过${C_RESET} (或用户忽略失败)\n"
-fi
+UPGRADE_INFO="将使用以下固件文件进行升级：\n  >> ${C_CYAN}${IMAGE_PATH_IMG}${C_RESET}\n\n"
+if [ "$SYSUPGRADE_ARGS" == "-n" ]; then UPGRADE_INFO="${UPGRADE_INFO}升级模式:\n  >> ${C_YELLOW}不保留配置数据${C_RESET} (使用 -n 选项)\n"; else UPGRADE_INFO="${UPGRADE_INFO}升级模式:\n  >> ${C_GREEN}尝试保留配置数据${C_RESET}\n"; fi
+if [ $SKIP_CHECKSUM -eq 1 ]; then UPGRADE_INFO="${UPGRADE_INFO}\n文件校验:\n  >> ${C_YELLOW}跳过或未执行${C_RESET}\n"; else UPGRADE_INFO="${UPGRADE_INFO}\n文件校验:\n  >> ${C_GREEN}SHA256 校验通过${C_RESET} (或用户忽略失败)\n"; fi
 
 # --- 询问是否强制升级 (-F) ---
 FORCE_FLAG=""
@@ -298,19 +283,17 @@ FORCE_WARN="${FORCE_WARN} ${C_YELLOW}'-F' (force) 选项会跳过固件兼容性
 FORCE_WARN="${FORCE_WARN} ${C_RED}错误或不兼容的固件配合 -F 选项极易导致设备变砖！${C_RESET}\n"
 FORCE_WARN="${FORCE_WARN} ${C_YELLOW}仅在您完全确定固件正确且了解风险时才应使用。${C_RESET}\n"
 FORCE_WARN="${FORCE_WARN}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
-echo -e "$FORCE_WARN" # 显示 -F 风险警告
+echo -e "$FORCE_WARN"
 read -p "$(echo -e "${C_B_YELLOW}❓ 是否要在本次升级中使用强制 '-F' 选项？ (y/N): ${C_RESET}")" confirm_force
 FORCE_FLAG_INFO=""
 if [[ "$confirm_force" =~ ^[Yy]$ ]]; then
     echo -e "${C_BLUE}信息：${C_RESET}用户选择【${C_B_RED}使用${C_RESET}】强制 '-F' 选项！"
-    FORCE_FLAG="-F"
-    FORCE_FLAG_INFO="\n强制执行:\n  >> ${C_B_RED}是 (-F 选项)${C_RESET}\n"
+    FORCE_FLAG="-F"; FORCE_FLAG_INFO="\n强制执行:\n  >> ${C_B_RED}是 (-F 选项)${C_RESET}\n";
 else
     echo -e "${C_BLUE}信息：${C_RESET}本次升级将【${C_GREEN}不使用${C_RESET}】强制 '-F' 选项。"
-    FORCE_FLAG=""
-    FORCE_FLAG_INFO="\n强制执行:\n  >> ${C_GREEN}否${C_RESET}\n"
+    FORCE_FLAG=""; FORCE_FLAG_INFO="\n强制执行:\n  >> ${C_GREEN}否${C_RESET}\n";
 fi
-UPGRADE_INFO="${UPGRADE_INFO}${FORCE_FLAG_INFO}" # 添加 -F 状态到摘要
+UPGRADE_INFO="${UPGRADE_INFO}${FORCE_FLAG_INFO}"
 
 # --- 询问是否详细输出 (-v) ---
 VERBOSE_FLAG=""
@@ -319,19 +302,17 @@ read -p "$(echo -e "${C_YELLOW}❓ 是否要在本次升级中启用详细输出
 VERBOSE_FLAG_INFO=""
 if [[ "$confirm_verbose" =~ ^[Yy]$ ]]; then
     echo -e "${C_BLUE}信息：${C_RESET}用户选择【${C_GREEN}启用${C_RESET}】详细输出模式 (-v)。"
-    VERBOSE_FLAG="-v"
-    VERBOSE_FLAG_INFO="\n详细输出:\n  >> ${C_GREEN}是 (-v 选项)${C_RESET}\n"
+    VERBOSE_FLAG="-v"; VERBOSE_FLAG_INFO="\n详细输出:\n  >> ${C_GREEN}是 (-v 选项)${C_RESET}\n";
 else
     echo -e "${C_BLUE}信息：${C_RESET}本次升级将【${C_YELLOW}不启用${C_RESET}】详细输出模式。"
-    VERBOSE_FLAG=""
-    VERBOSE_FLAG_INFO="\n详细输出:\n  >> ${C_YELLOW}否${C_RESET}\n"
+    VERBOSE_FLAG=""; VERBOSE_FLAG_INFO="\n详细输出:\n  >> ${C_YELLOW}否${C_RESET}\n";
 fi
-UPGRADE_INFO="${UPGRADE_INFO}${VERBOSE_FLAG_INFO}" # 添加 -v 状态到摘要
+UPGRADE_INFO="${UPGRADE_INFO}${VERBOSE_FLAG_INFO}"
 
 # --- 最终确认与执行 ---
 echo
 echo -e "${C_BLUE}========================= 升 级 前 最 终 确 认 ========================${C_RESET}"
-echo -e "$UPGRADE_INFO" # 显示包含所有选项状态的最终信息
+echo -e "$UPGRADE_INFO"
 if [ -z "$SYSUPGRADE_ARGS" ]; then echo -e "${C_YELLOW}建议提前备份重要数据。${C_RESET}\n"; fi
 echo -e "${C_B_YELLOW}升级过程中，请务必保持设备通电，不要中断操作！${C_RESET}"
 echo -e "${C_BLUE}=====================================================================${C_RESET}"
@@ -343,7 +324,7 @@ if [[ "$confirm_upgrade" =~ ^[Yy]$ ]]; then
     MSG_DESC="信息：正在执行 sysupgrade 命令 ("
     FLAG_DESC=""
     [ -n "$FORCE_FLAG" ] && FLAG_DESC="${C_B_RED}强制${C_RESET}${FLAG_DESC}"
-    [ -n "$VERBOSE_FLAG" ] && FLAG_DESC="${FLAG_DESC}${FLAG_DESC:+, }${C_GREEN}详细${C_RESET}"
+    [ -n "$VERBOSE_FLAG" ] && FLAG_DESC="${FLAG_DESC}${FLAG_DESC:+, }${C_GREEN}详细${C_RESET}" # Add comma if needed
 
     if [ -z "$SYSUPGRADE_ARGS" ]; then DATA_DESC="${C_GREEN}保留数据${C_RESET}"; else DATA_DESC="${C_YELLOW}不保留数据${C_RESET}"; fi
     if [ -n "$FLAG_DESC" ]; then MSG_DESC="${MSG_DESC}${FLAG_DESC}, ${DATA_DESC})..."; else MSG_DESC="${MSG_DESC}${DATA_DESC})..."; fi
@@ -354,11 +335,15 @@ if [[ "$confirm_upgrade" =~ ^[Yy]$ ]]; then
 
     echo # 换行
     echo -e "${C_B_GREEN}✅ 信息：sysupgrade 命令已执行。如果成功，系统将会重启。${C_RESET}"
-    exit 0
+    echo -e "${C_BLUE}信息：${C_RESET}禁用临时文件清理陷阱，因为升级已启动。"
+    # *** 修改点：禁用 EXIT 陷阱 ***
+    trap - EXIT
+    exit 0 # 正常退出，此时 cleanup 不会执行
 else
     echo # 换行
     echo -e "${C_YELLOW}操作已取消。${C_RESET}解压后的固件文件保留在 '${C_CYAN}${IMAGE_PATH_IMG}${C_RESET}'，您可以手动升级或删除它。"
+    # 注意：此路径退出时，cleanup 仍然会被执行
     exit 0
 fi
 
-exit 0 # 备用退出点
+exit 0 # 备用退出点 (cleanup 会被执行)
