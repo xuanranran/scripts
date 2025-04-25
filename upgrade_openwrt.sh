@@ -4,24 +4,27 @@
 REPO="xuanranran/OpenWRT-X86_64"                                           # 目标 GitHub 仓库
 IMAGE_FILENAME_GZ="immortalwrt-x86-64-generic-squashfs-combined-efi.img.gz" # 压缩固件的文件名
 IMAGE_FILENAME_IMG="${IMAGE_FILENAME_GZ%.gz}"                             # 解压后的固件文件名 (自动从压缩文件名生成)
+CHECKSUM_FILENAME="sha256sums"                                             # 校验和文件名 (假设)
 TMP_DIR="/tmp"                                                             # 临时文件目录
 IMAGE_PATH_GZ="$TMP_DIR/$IMAGE_FILENAME_GZ"                                # 压缩固件的完整路径
 IMAGE_PATH_IMG="$TMP_DIR/$IMAGE_FILENAME_IMG"                              # 解压后固件的完整路径
+CHECKSUM_PATH="$TMP_DIR/$CHECKSUM_FILENAME"                                # 校验和文件的完整路径
 THRESHOLD_KIB=1887437                                                      # 保留数据的空间阈值 (1.8 GiB in KiB)
 
 # --- 退出脚本时清理临时文件 ---
 cleanup() {
   echo "信息：正在清理临时文件..."
-  rm -f "$IMAGE_PATH_GZ" "$IMAGE_PATH_IMG" # 清理压缩包和解压后的文件
+  # 清理压缩包、解压后的文件和校验文件
+  rm -f "$IMAGE_PATH_GZ" "$IMAGE_PATH_IMG" "$CHECKSUM_PATH"
 }
-# trap cleanup EXIT
+trap cleanup EXIT
 
 # --- 设置：如果任何命令失败则立即退出 ---
 # 在依赖项安装步骤中会临时禁用此设置
 # set -e
 
-# --- 1. 检查并尝试安装依赖项 (检查 wget, jq, gunzip, awk) ---
-echo "信息：正在检查并尝试安装所需工具 (wget, jq, gunzip, awk)..."
+# --- 1. 检查并尝试安装依赖项 (检查 wget, jq, gunzip, awk, sha256sum) ---
+echo "信息：正在检查并尝试安装所需工具 (wget, jq, gunzip, awk, sha256sum)..." # 添加了 sha256sum
 
 PKG_MANAGER=""             # 检测到的包管理器 (opkg 或 apk)
 UPDATE_CMD=""              # 更新命令
@@ -40,27 +43,33 @@ elif command -v apk >/dev/null 2>&1; then
     INSTALL_CMD="apk add" # apk 使用 'add'
 else
     echo >&2 "错误：无法检测到 'opkg' 或 'apk' 包管理器。"
-    echo >&2 "请确保其中一个已安装并位于 PATH 中，或手动安装依赖项 (wget, jq, gzip)。awk 通常包含在 busybox 中。"
+    # coreutils 提供 sha256sum, gzip 提供 gunzip, awk 通常由 busybox 提供
+    echo >&2 "请确保其中一个已安装并位于 PATH 中，或手动安装依赖项 (wget, jq, gzip, coreutils)。awk 通常包含在 busybox 中。"
     exit 1
 fi
 
 update_run=0 # 标记更新命令是否已运行
 
 # --- 定义需要的 '命令' 并检查 ---
-required_cmds=( "wget" "jq" "gunzip" "awk" ) # 需要检查的命令
-missing_pkgs=()                        # 需要安装的软件包列表 (不包含 busybox/awk)
-missing_cmds_found_initially=()        # 初始检查时未找到的命令列表
+required_cmds=( "wget" "jq" "gunzip" "awk" "sha256sum" ) # 添加 "sha256sum"
+missing_pkgs=()                                       # 需要安装的软件包列表
+missing_cmds_found_initially=()                       # 初始检查时未找到的命令列表
 
-echo "信息：正在检查所需的 命令 (wget, jq, gunzip, awk) 并识别需要安装的 软件包..."
+echo "信息：正在检查所需的 命令 (wget, jq, gunzip, awk, sha256sum) 并识别需要安装的 软件包..."
 for cmd_to_check in "${required_cmds[@]}"; do
     echo "信息：  检查 命令 '$cmd_to_check'..."
     if ! command -v "$cmd_to_check" >/dev/null 2>&1; then
         pkg_name="" # 假设初始没有独立包
+        # 确定提供该命令的包名
         if [ "$cmd_to_check" == "gunzip" ]; then
             pkg_name="gzip"
+        elif [ "$cmd_to_check" == "sha256sum" ]; then
+             # sha256sum 通常由 coreutils 提供
+             pkg_name="coreutils"
         elif [ "$cmd_to_check" == "wget" ] || [ "$cmd_to_check" == "jq" ]; then
              pkg_name="$cmd_to_check"
         fi
+        # awk 通常由 busybox 提供，不单独安装
 
         echo "信息：  命令 '$cmd_to_check' 未找到。"
         missing_cmds_found_initially+=("$cmd_to_check") # 记录未找到的 命令
@@ -77,7 +86,7 @@ for cmd_to_check in "${required_cmds[@]}"; do
     fi
 done
 
-# --- 尝试安装缺失的软件包 (wget, jq, gzip only) ---
+# --- 尝试安装缺失的软件包 (wget, jq, gzip, coreutils only) ---
 if [ ${#missing_pkgs[@]} -gt 0 ]; then
     missing_pkgs_str=$(IFS=" "; echo "${missing_pkgs[*]}")
     echo "信息：检测到缺失必需的软件包: ${missing_pkgs_str}"
@@ -98,29 +107,36 @@ if [ ${#missing_pkgs[@]} -gt 0 ]; then
         echo "警告：软件包安装命令 '$INSTALL_CMD ${missing_pkgs_str}' 的退出码为 $install_status。"
     fi
 
+    # 重新检查依赖项
     echo "信息：正在重新检查依赖项..."
     final_recheck_missing_cmds=()
     for cmd_to_recheck in "${missing_cmds_found_initially[@]}"; do
-        if ! command -v "$cmd_to_recheck" >/dev/null 2>&1; then
-             final_recheck_missing_cmds+=("$cmd_to_recheck")
-        fi
+        # 仅检查我们尝试安装的包对应的命令
+         pkg_to_find=""
+         if [ "$cmd_to_recheck" == "gunzip" ]; then pkg_to_find="gzip";
+         elif [ "$cmd_to_recheck" == "sha256sum" ]; then pkg_to_find="coreutils";
+         elif [ "$cmd_to_recheck" == "wget" ]; then pkg_to_find="wget";
+         elif [ "$cmd_to_recheck" == "jq" ]; then pkg_to_find="jq"; fi
+
+         if [[ " ${missing_pkgs[@]} " =~ " ${pkg_to_find} " ]]; then
+             if ! command -v "$cmd_to_recheck" >/dev/null 2>&1; then
+                 final_recheck_missing_cmds+=("$cmd_to_recheck")
+             fi
+         fi
     done
 
     if [ ${#final_recheck_missing_cmds[@]} -gt 0 ]; then
          final_missing_cmds_str=$(IFS=" "; echo "${final_recheck_missing_cmds[*]}")
          echo >&2 "错误：必需的依赖项安装失败或仍然缺失。"
          echo >&2 "       仍然缺失以下命令: ${final_missing_cmds_str}"
-         if [[ " ${final_missing_cmds_str} " =~ " awk " ]]; then
-            echo >&2 "       'awk' 命令缺失通常表明系统基础不完整。"
-         else
-            echo >&2 "       请检查网络连接、$PKG_MANAGER 配置，并尝试手动安装。"
-         fi
+         echo >&2 "       请检查网络连接、$PKG_MANAGER 配置，并尝试手动安装。"
          exit 1
      else
-         echo "信息：所有必需的软件包似乎都已成功安装。"
+         echo "信息：所有尝试安装的必需软件包似乎都已成功安装。"
      fi
 fi
 
+# 最终确认所有命令都存在
 echo "信息：依赖项最终检查..."
 final_check_missing_cmds=()
 for cmd_to_verify in "${required_cmds[@]}"; do
@@ -132,20 +148,22 @@ done
 if [ ${#final_check_missing_cmds[@]} -gt 0 ]; then
     final_missing_cmds_str=$(IFS=" "; echo "${final_check_missing_cmds[*]}")
     echo >&2 "错误：脚本运行缺少必要的命令: ${final_missing_cmds_str}"
+    # 提示具体原因
     if [[ " ${final_missing_cmds_str} " =~ " awk " ]]; then
          echo >&2 "       'awk' 命令缺失，这通常表明系统基础 (busybox) 不完整，脚本无法继续。"
+    elif [[ " ${final_missing_cmds_str} " =~ " sha256sum " ]]; then
+         echo >&2 "       'sha256sum' 命令缺失，请尝试手动安装 'coreutils' 包。"
     else
          echo >&2 "       请检查之前的安装日志或尝试手动安装。"
     fi
     exit 1
 fi
-echo "信息：所有必需的依赖项 (wget, jq, gunzip, awk) 都已找到。"
+echo "信息：所有必需的依赖项 (wget, jq, gunzip, awk, sha256sum) 都已找到。"
 
 # 启用严格错误检查
 set -e
 
 # --- 2. 临时增大 /tmp 分区 ---
-# *** 重新加入此步骤 ***
 echo "信息：尝试临时将 /tmp 重新挂载为更大内存（RAM 的 100%）..."
 echo "      注意：此更改仅在本次运行期间有效，重启后失效。"
 mount -t tmpfs -o remount,size=100% tmpfs /tmp || echo "警告：重新挂载 /tmp 可能失败或不受支持，继续执行..."
@@ -163,11 +181,13 @@ if [ -z "$RELEASE_INFO" ]; then
     exit 1
 fi
 
-# --- 4. 查找固件文件 URL ---
-echo "信息：正在查找压缩固件 '$IMAGE_FILENAME_GZ' 的下载链接..."
+# --- 4. 查找固件和校验文件 URL ---
+echo "信息：正在查找压缩固件 '$IMAGE_FILENAME_GZ' 和校验文件 '$CHECKSUM_FILENAME' 的下载链接..."
 IMAGE_URL=$(echo "$RELEASE_INFO" | jq -r --arg NAME "$IMAGE_FILENAME_GZ" '.assets[] | select(.name==$NAME) | .browser_download_url')
+CHECKSUM_URL=$(echo "$RELEASE_INFO" | jq -r --arg NAME "$CHECKSUM_FILENAME" '.assets[] | select(.name==$NAME) | .browser_download_url')
 RELEASE_TAG=$(echo "$RELEASE_INFO" | jq -r '.tag_name // "未知标签"')
 
+SKIP_CHECKSUM=0 # 默认不跳过校验
 if [ -z "$IMAGE_URL" ] || [ "$IMAGE_URL" == "null" ]; then
     echo >&2 "错误：在最新版本 '$RELEASE_TAG' 中未找到压缩固件文件 '$IMAGE_FILENAME_GZ'。"
     echo >&2 "       请检查仓库发布或脚本中的文件名配置。"
@@ -176,12 +196,21 @@ fi
 echo "信息：找到最新版本 '$RELEASE_TAG'"
 echo "信息：压缩固件下载链接: $IMAGE_URL"
 
-# --- 5. 下载压缩固件 ---
+if [ -z "$CHECKSUM_URL" ] || [ "$CHECKSUM_URL" == "null" ]; then
+     echo "警告：在最新版本 '$RELEASE_TAG' 中未找到校验文件 '$CHECKSUM_FILENAME'，将跳过文件完整性校验。"
+     SKIP_CHECKSUM=1
+else
+     echo "信息：校验文件下载链接: $CHECKSUM_URL"
+fi
+
+# --- 5. 下载压缩固件和校验文件 ---
+# -- 下载固件 --
 echo "---------------------------------------------------------------------"
 echo "已找到固件文件："
 echo "  版本标签: $RELEASE_TAG"
 echo "  下载链接: $IMAGE_URL"
 echo "  目标路径: $IMAGE_PATH_GZ"
+if [ $SKIP_CHECKSUM -eq 1 ]; then echo "  校验文件: 未找到"; else echo "  校验文件链接: $CHECKSUM_URL"; fi
 echo "---------------------------------------------------------------------"
 read -p "是否开始下载此固件文件？ (y/N): " confirm_download
 
@@ -194,7 +223,56 @@ echo "信息：正在下载压缩固件 '$IMAGE_FILENAME_GZ' 到 '$IMAGE_PATH_GZ
 wget --progress=bar:force --no-check-certificate -O "$IMAGE_PATH_GZ" "$IMAGE_URL"
 echo "信息：压缩固件下载完成。"
 
-# --- 6. 解压固件 (需要 gunzip 命令) ---
+# -- 下载校验文件 (如果找到链接的话) --
+if [ $SKIP_CHECKSUM -eq 0 ]; then
+    echo "信息：正在下载校验文件 '$CHECKSUM_FILENAME' 到 '$CHECKSUM_PATH' ..."
+    # 下载时允许失败，如果失败则跳过校验
+    set +e # 临时允许命令失败
+    wget -q --no-check-certificate -O "$CHECKSUM_PATH" "$CHECKSUM_URL"
+    if [ $? -ne 0 ]; then
+        echo "警告：下载校验文件 '$CHECKSUM_FILENAME' 失败，将跳过文件完整性校验。"
+        rm -f "$CHECKSUM_PATH" # 清理可能不完整的文件
+        SKIP_CHECKSUM=1
+    else
+        echo "信息：校验文件下载完成。"
+    fi
+    set -e # 恢复错误即退出的设置
+fi
+
+# --- 6. 校验固件完整性 (SHA256) ---
+if [ $SKIP_CHECKSUM -eq 1 ]; then
+    echo "信息：跳过文件完整性校验。"
+else
+    echo "信息：正在校验文件 '$IMAGE_FILENAME_GZ' 的 SHA256 哈希值..."
+    # 从校验文件中提取期望的哈希值 (需要处理空格和换行)
+    EXPECTED_SUM=$(grep "$IMAGE_FILENAME_GZ" "$CHECKSUM_PATH" | awk '{print $1}')
+
+    if [ -z "$EXPECTED_SUM" ]; then
+         echo "警告：在校验文件 '$CHECKSUM_FILENAME' 中未能找到固件 '$IMAGE_FILENAME_GZ' 的校验信息。跳过校验。"
+         SKIP_CHECKSUM=1 # 标记为跳过，以免误判
+    else
+        # 计算下载文件的实际哈希值
+        CALCULATED_SUM=$(sha256sum "$IMAGE_PATH_GZ" | awk '{print $1}')
+        echo "信息：期望 SHA256: $EXPECTED_SUM"
+        echo "信息：计算 SHA256: $CALCULATED_SUM"
+
+        if [ "$EXPECTED_SUM" == "$CALCULATED_SUM" ]; then
+            echo "信息：校验成功！文件完整。"
+        else
+            echo >&2 "错误：SHA256 校验和不匹配！文件可能已损坏或不完整。"
+            read -p "警告：文件校验失败！是否仍要继续升级？(y/N): " confirm_checksum
+            if [[ ! "$confirm_checksum" =~ ^[Yy]$ ]]; then
+                echo "操作中止。"
+                exit 1 # 校验失败且用户选择中止，则退出
+            fi
+            echo "信息：用户选择忽略校验失败并继续。"
+        fi
+    fi
+fi
+# 清理校验文件（无论校验是否执行或成功）
+rm -f "$CHECKSUM_PATH"
+
+# --- 7. 解压固件 (需要 gunzip 命令) ---
 echo "信息：正在解压固件 '$IMAGE_PATH_GZ' -> '$IMAGE_PATH_IMG' ..."
 gunzip "$IMAGE_PATH_GZ"
 
@@ -204,10 +282,9 @@ if [ ! -f "$IMAGE_PATH_IMG" ]; then
 fi
 echo "信息：固件解压完成。解压后文件: '$IMAGE_PATH_IMG'"
 ls -lh "$IMAGE_PATH_IMG"
-echo "警告：已跳过文件完整性校验！请自行承担风险。"
 
 
-# --- 7. 检查空间并确定升级选项 ---
+# --- 8. 检查空间并确定升级选项 ---
 echo "信息：正在检查 /tmp 可用空间以确定升级选项..."
 AVAILABLE_KIB=$(df -k /tmp | awk 'NR==2 {print $4}')
 
@@ -238,39 +315,46 @@ if [ "$KEEP_DATA_ALLOWED" -eq 1 ]; then
     fi
 fi
 
-# --- 8. 询问可选参数并执行升级 ---
+# --- 9. 询问可选参数并执行升级 ---
 UPGRADE_INFO="将使用以下 *解压后* 的固件文件进行升级：\n$IMAGE_PATH_IMG\n"
 if [ "$SYSUPGRADE_ARGS" == "-n" ]; then
     UPGRADE_INFO="${UPGRADE_INFO}\n注意：升级将不会保留现有的配置数据！(使用 -n 选项)\n"
 else
     UPGRADE_INFO="${UPGRADE_INFO}\n注意：升级将尝试保留现有的配置数据。\n"
 fi
+# 添加校验状态信息
+if [ $SKIP_CHECKSUM -eq 1 ]; then
+    UPGRADE_INFO="${UPGRADE_INFO}\n警告：本次升级跳过了文件完整性校验！\n"
+else
+     UPGRADE_INFO="${UPGRADE_INFO}\n信息：文件完整性校验已通过。\n" # 或者用户忽略了失败
+fi
+
 
 # --- 询问是否强制升级 (-F) ---
-FORCE_FLAG="" # -F 参数标志，默认为空
+FORCE_FLAG=""
 FORCE_WARN="\n\n!!!!!!!!!!!!!!!!!!!!!!!!!!!! 危 险 操 作 提 示 !!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
 FORCE_WARN="${FORCE_WARN} '-F' (force) 选项会跳过固件兼容性检查。\n"
 FORCE_WARN="${FORCE_WARN} 错误或不兼容的固件配合 -F 选项极易导致设备变砖！\n"
 FORCE_WARN="${FORCE_WARN} 仅在您完全确定固件正确且了解风险时才应使用。\n"
 FORCE_WARN="${FORCE_WARN}!!!!!!!!!!!!!!!!!!!!!!!!!!!! 危 险 操 作 提 示 !!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
-echo -e "$FORCE_WARN" # 显示 -F 风险警告
+echo -e "$FORCE_WARN"
 read -p "是否要在本次升级中使用强制 '-F' 选项？ (y/N): " confirm_force
 if [[ "$confirm_force" =~ ^[Yy]$ ]]; then
     echo "信息：用户选择使用强制 '-F' 选项进行升级。"
     FORCE_FLAG="-F"
-    UPGRADE_INFO="${UPGRADE_INFO}\n*** 本次升级将强制执行 (-F 选项)！ ***\n" # 在最终摘要中加入-F提示
+    UPGRADE_INFO="${UPGRADE_INFO}\n*** 本次升级将强制执行 (-F 选项)！ ***\n"
 else
     echo "信息：本次升级将不使用强制 '-F' 选项。"
     FORCE_FLAG=""
 fi
 
 # --- 询问是否详细输出 (-v) ---
-VERBOSE_FLAG="" # -v 参数标志，默认为空
+VERBOSE_FLAG=""
 read -p "是否要在本次升级中启用详细输出模式 '-v' (verbose)？ (y/N): " confirm_verbose
 if [[ "$confirm_verbose" =~ ^[Yy]$ ]]; then
     echo "信息：用户选择启用详细输出模式 (-v)。"
     VERBOSE_FLAG="-v"
-    UPGRADE_INFO="${UPGRADE_INFO}\n* 本次升级将启用详细输出 (-v 选项)。\n" # 在最终摘要中加入-v提示
+    UPGRADE_INFO="${UPGRADE_INFO}\n* 本次升级将启用详细输出 (-v 选项)。\n"
 else
     echo "信息：本次升级将不启用详细输出模式。"
     VERBOSE_FLAG=""
@@ -279,8 +363,7 @@ fi
 # --- 最终确认与执行 ---
 echo "---------------------------------------------------------------------"
 echo -e "警告：即将开始系统升级！"
-echo -e "$UPGRADE_INFO" # 显示包含 -F 和 -v 状态的最终信息
-echo "警告：本次升级未进行文件完整性校验！"
+echo -e "$UPGRADE_INFO" # 显示包含所有选项状态的最终信息
 echo "升级过程中，请务必保持设备通电，不要中断操作！"
 if [ -z "$SYSUPGRADE_ARGS" ]; then # 只有在尝试保留配置时才强烈建议备份
     echo "建议提前备份重要数据。"
@@ -289,26 +372,15 @@ echo "---------------------------------------------------------------------"
 read -p "确认要开始执行 sysupgrade 升级吗？ (y/N): " confirm_upgrade
 
 if [[ "$confirm_upgrade" =~ ^[Yy]$ ]]; then
-    # 构造最终执行信息
     MSG_DESC="信息：正在执行 sysupgrade 命令 ("
     FLAG_DESC=""
     [ -n "$FORCE_FLAG" ] && FLAG_DESC="强制$FLAG_DESC"
-    [ -n "$VERBOSE_FLAG" ] && FLAG_DESC="${FLAG_DESC}${FLAG_DESC:+, }详细" # Add comma if needed
+    [ -n "$VERBOSE_FLAG" ] && FLAG_DESC="${FLAG_DESC}${FLAG_DESC:+, }详细"
 
-    if [ -z "$SYSUPGRADE_ARGS" ]; then
-        DATA_DESC="保留数据"
-    else
-        DATA_DESC="不保留数据"
-    fi
-
-    if [ -n "$FLAG_DESC" ]; then
-         MSG_DESC="${MSG_DESC}${FLAG_DESC}, ${DATA_DESC})..."
-    else
-         MSG_DESC="${MSG_DESC}${DATA_DESC})..."
-    fi
+    if [ -z "$SYSUPGRADE_ARGS" ]; then DATA_DESC="保留数据"; else DATA_DESC="不保留数据"; fi
+    if [ -n "$FLAG_DESC" ]; then MSG_DESC="${MSG_DESC}${FLAG_DESC}, ${DATA_DESC})..."; else MSG_DESC="${MSG_DESC}${DATA_DESC})..."; fi
     echo "$MSG_DESC"
 
-    # 执行命令
     sysupgrade $FORCE_FLAG $VERBOSE_FLAG $SYSUPGRADE_ARGS "$IMAGE_PATH_IMG"
 
     echo "信息：sysupgrade 命令已执行。如果成功，系统将会重启。"
