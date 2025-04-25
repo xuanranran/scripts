@@ -32,7 +32,7 @@ cleanup() {
 
 # --- 清理文件 ---
 clean_up () {
-    rm -rf *.img* ${img_path}/*.img* *sha256sums* *update*.sh*
+    rm -rf "$IMAGE_PATH_GZ" "$IMAGE_PATH_IMG" "$CHECKSUM_PATH" *.img* $TMP_DIR/*.img* *update*.sh* *upgrade*.sh*
 }
 
 # --- 设置：如果任何命令失败则立即退出 ---
