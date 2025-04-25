@@ -21,27 +21,19 @@ IMAGE_PATH_GZ="$TMP_DIR/$IMAGE_FILENAME_GZ"                                # 压
 IMAGE_PATH_IMG="$TMP_DIR/$IMAGE_FILENAME_IMG"                              # 解压后固件的完整路径
 CHECKSUM_PATH="$TMP_DIR/$CHECKSUM_FILENAME"                                # 校验和文件的完整路径
 THRESHOLD_KIB=614400                                                       # 保留数据的空间阈值 (600 MiB in KiB)
+MEM_THRESHOLD_KIB=1048576                                                  # *** 新增：运行脚本的最低内存阈值 (1 GiB = 1024*1024 KiB) ***
 
 # --- 退出脚本时清理临时文件 ---
 cleanup() {
-  # 这个函数会在脚本退出时执行，清理本次运行产生的文件
   echo # 清理前空一行
-  echo -e "${C_BLUE}信息：${C_RESET}正在清理本次运行时产生的临时文件..."
+  echo -e "${C_BLUE}信息：${C_RESET}正在清理临时文件..."
   rm -f "$IMAGE_PATH_GZ" "$IMAGE_PATH_IMG" "$CHECKSUM_PATH"
 }
-# 设置陷阱：当脚本退出时（EXIT信号），执行 cleanup 函数
 # trap cleanup EXIT # 升级成功不会执行
 
 # --- 设置：如果任何命令失败则立即退出 ---
 # 在依赖项安装/检查步骤中会临时禁用此设置
 # set -e
-
-# *** 新增：脚本运行时首先清理旧的临时固件文件 ***
-echo
-echo -e "${C_BLUE}信息：${C_RESET}正在清理 /tmp 目录中可能存在的旧固件或校验文件..."
-rm -f "$IMAGE_PATH_GZ" "$IMAGE_PATH_IMG" "$CHECKSUM_PATH"
-echo -e "${C_BLUE}信息：${C_RESET}旧文件清理完成。"
-# *** 清理结束 ***
 
 echo
 echo -e "${C_BLUE}=====================================================================${C_RESET}"
@@ -141,65 +133,70 @@ echo -e "${C_B_GREEN}信息：${C_RESET}所有必需的依赖项 (wget, jq, gunz
 echo -e "${C_BLUE}--- 步骤 1 完成 ---${C_RESET}"
 echo
 
-# --- 2. 显示系统和磁盘信息 ---
-echo -e "${C_BLUE}--- 步骤 2: 显示系统和磁盘信息 ---${C_RESET}"
+# --- 2. 显示系统信息并检查内存 ---  << 修改点: 整合内存检查 >>
+echo -e "${C_BLUE}--- 步骤 2: 显示系统信息并检查内存 ---${C_RESET}"
 echo -e "${C_BLUE}信息：${C_RESET}正在收集当前系统信息..."
 echo
 
+# --- 内存检查 (必须 >= 1GiB) ---
+echo -e "${C_CYAN}>> 内存检查:${C_RESET}"
+mem_total_kib=$(grep '^MemTotal:' /proc/meminfo | awk '{print $2}')
+
+if [ -z "$mem_total_kib" ]; then
+    echo -e "  ${C_YELLOW}警告：无法读取总内存大小，跳过内存检查。${C_RESET}"
+elif [ "$mem_total_kib" -lt "$MEM_THRESHOLD_KIB" ]; then
+    # 计算总 MiB 用于错误消息
+    mem_total_mib=$(awk -v total_kib="$mem_total_kib" 'BEGIN { printf "%.0f", total_kib/1024 }')
+    echo -e "  ${C_B_RED}错误：系统总内存 (${mem_total_mib} MiB) 低于运行此脚本所需的最低要求 (1024 MiB)。${C_RESET}" >&2
+    echo -e "        为避免下载或解压失败，脚本将退出。" >&2
+    exit 1 # 内存不足，退出脚本
+else
+    mem_total_mib=$(awk -v total_kib="$mem_total_kib" 'BEGIN { printf "%.0f", total_kib/1024 }')
+    echo -e "  ${C_GREEN}内存检查通过 (总计: ${mem_total_mib} MiB)。${C_RESET}"
+fi
+echo
+
+# --- 显示简化内存信息 ---
+echo -e "${C_CYAN}>> 内存信息 (当前):${C_RESET}"
+mem_avail_kib=$(grep '^MemAvailable:' /proc/meminfo | awk '{print $2}') # MemAvailable 通常比 MemFree 更准确
+
+# 只有在成功读取到总内存后才尝试显示详细信息
+if [ -n "$mem_total_kib" ]; then
+    if [ -n "$mem_avail_kib" ]; then
+        # 使用 awk 计算并格式化为 MiB
+        awk -v total_kib="$mem_total_kib" -v avail_kib="$mem_avail_kib" 'BEGIN { printf "  总计: %.0f MiB / 可用: %.0f MiB\n", total_kib/1024, avail_kib/1024 }'
+    else
+         # 如果缺少 MemAvailable，只显示总内存
+         awk -v total_kib="$mem_total_kib" 'BEGIN { printf "  总计: %.0f MiB\n", total_kib/1024 }'
+         echo -e "  ${C_YELLOW}(无法获取可用内存信息)${C_RESET}"
+    fi
+else
+    # 如果连 MemTotal 都没读到
+    echo -e "  ${C_YELLOW}无法从 /proc/meminfo 获取内存信息。${C_RESET}"
+fi
+echo
+
+# --- 其他系统信息 ---
 # 型号/主板信息
 echo -e "${C_CYAN}>> 设备型号/主板信息:${C_RESET}"
 model_info_found=0
+# (此处沿用上一版优化后的型号获取逻辑，确保显示正确来源且去除型号颜色)
 if [ $UBUS_PRESENT -eq 1 ]; then
-    ubus_output=$(ubus call system board 2>/dev/null)
+    ubus_output=$(ubus call system board 2>/dev/null);
     if [ -n "$ubus_output" ]; then
-        model=$(echo "$ubus_output" | jq -r '.model // empty')
-        board=$(echo "$ubus_output" | jq -r '.board_name // empty')
+        model=$(echo "$ubus_output" | jq -r '.model // empty'); board=$(echo "$ubus_output" | jq -r '.board_name // empty');
         if [ -n "$model" ] || [ -n "$board" ]; then
-             echo "  来源: ubus"
-             [ -n "$model" ] && echo "    型号: $model"
-             [ -n "$board" ] && echo "    主板: $board"
-             model_info_found=1
-        else
-             echo -e "  ${C_YELLOW}(ubus 未返回有效型号/主板信息)${C_RESET}"
-        fi
-    else
-         echo -e "  ${C_YELLOW}(ubus 命令执行失败或无输出)${C_RESET}"
-    fi
+             echo "  来源: ubus"; [ -n "$model" ] && echo "    型号: $model"; [ -n "$board" ] && echo "    主板: $board"; model_info_found=1;
+        else echo -e "  ${C_YELLOW}(ubus 未返回有效型号/主板信息)${C_RESET}"; fi
+    else echo -e "  ${C_YELLOW}(ubus 命令执行失败或无输出)${C_RESET}"; fi
 fi
 if [ $model_info_found -eq 0 ] && [ -f /tmp/sysinfo/model ]; then
-    model_sysinfo=$(cat /tmp/sysinfo/model)
-    if [ -n "$model_sysinfo" ]; then
-        echo "  来源: /tmp/sysinfo/model"
-        echo "    型号: $model_sysinfo"
-        model_info_found=1
-    fi
+    model_sysinfo=$(cat /tmp/sysinfo/model); if [ -n "$model_sysinfo" ]; then echo "  来源: /tmp/sysinfo/model"; echo "    型号: $model_sysinfo"; model_info_found=1; fi
 fi
 if [ $model_info_found -eq 0 ] && [ -r /proc/device-tree/model ]; then
-     model_dt=$(cat /proc/device-tree/model 2>/dev/null | tr -d '\0')
-     if [ -n "$model_dt" ]; then
-         echo "  来源: /proc/device-tree/model"
-         echo "    型号: $model_dt"
-         model_info_found=1
-     fi
+     model_dt=$(cat /proc/device-tree/model 2>/dev/null | tr -d '\0'); if [ -n "$model_dt" ]; then echo "  来源: /proc/device-tree/model"; echo "    型号: $model_dt"; model_info_found=1; fi
 fi
-if [ $model_info_found -eq 0 ]; then
-    echo -e "  ${C_YELLOW}无法自动确定设备型号或主板名称。${C_RESET}"
-fi
-echo
-
-# CPU 信息 (简化)
-echo -e "${C_CYAN}>> CPU:${C_RESET}"
-grep 'model name' /proc/cpuinfo | head -n1 | sed 's/^model name[[:space:]]*: /  /' || echo -e "  ${C_YELLOW}无法获取 CPU 型号。${C_RESET}"
-echo
-
-# 内存信息
-echo -e "${C_CYAN}>> 内存信息:${C_RESET}"
-if command -v free >/dev/null 2>&1; then
-    free -h | sed 's/^/  /'
-else
-    echo -e "  ${C_YELLOW}(未找到 free 命令，尝试读取 /proc/meminfo)${C_RESET}"
-    grep -E 'MemTotal|MemFree|MemAvailable' /proc/meminfo | sed 's/^/  /' || echo -e "  ${C_YELLOW}无法获取内存信息。${C_RESET}"
-fi
+if [ $model_info_found -eq 0 ]; then echo -e "  ${C_YELLOW}无法自动确定设备型号或主板名称。${C_RESET}"; fi
 echo
 
 # 磁盘分区和挂载点信息 (lsblk)
@@ -288,12 +285,12 @@ echo -e "${C_BLUE}--- 步骤 8: 校验固件完整性 (SHA256) ---${C_RESET}"
 if [ $SKIP_CHECKSUM -eq 1 ]; then
     echo -e "${C_YELLOW}信息：由于之前步骤未能找到或下载校验文件，跳过文件完整性校验。${C_RESET}"
 else
-    echo # 添加空行让提示更清晰
+    echo
     read -p "$(echo -e "${C_YELLOW}❓ 是否需要执行 SHA256 固件完整性校验？ (Y/n): ${C_RESET}")" confirm_run_checksum
 
     if [[ "$confirm_run_checksum" =~ ^[Nn]$ ]]; then
         echo -e "${C_YELLOW}信息：用户选择跳过文件完整性校验。${C_RESET}"
-        SKIP_CHECKSUM=1 # 用户选择跳过
+        SKIP_CHECKSUM=1
     else
         echo -e "${C_BLUE}信息：${C_RESET}正在校验文件 '${C_CYAN}${IMAGE_FILENAME_GZ}${C_RESET}' 的 SHA256 哈希值..."
         EXPECTED_SUM=$(grep "$IMAGE_FILENAME_GZ" "$CHECKSUM_PATH" | awk '{print $1}')
