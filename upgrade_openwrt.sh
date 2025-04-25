@@ -14,7 +14,7 @@ THRESHOLD_KIB=1887437                                                      # 保
 # --- 退出脚本时清理临时文件 ---
 # cleanup() {
   # echo "信息：正在清理临时文件..."
-  清理压缩包、解压后的文件和校验文件
+  # 清理压缩包、解压后的文件和校验文件
   # rm -f "$IMAGE_PATH_GZ" "$IMAGE_PATH_IMG" "$CHECKSUM_PATH"
 # }
 # trap cleanup EXIT
