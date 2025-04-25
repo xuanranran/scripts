@@ -20,7 +20,7 @@ TMP_DIR="/tmp"                                                             # 临
 IMAGE_PATH_GZ="$TMP_DIR/$IMAGE_FILENAME_GZ"                                # 压缩固件的完整路径
 IMAGE_PATH_IMG="$TMP_DIR/$IMAGE_FILENAME_IMG"                              # 解压后固件的完整路径
 CHECKSUM_PATH="$TMP_DIR/$CHECKSUM_FILENAME"                                # 校验和文件的完整路径
-THRESHOLD_KIB=614400                                                       # *** 修改点: 保留数据的空间阈值 (600 MiB in KiB) ***
+THRESHOLD_KIB=614400                                                       # 保留数据的空间阈值 (600 MiB in KiB)
 
 # --- 退出脚本时清理临时文件 ---
 cleanup() {
@@ -143,7 +143,7 @@ echo -e "${C_BLUE}信息：${C_RESET}正在收集当前系统信息..."
 echo
 
 # 型号/主板信息
-echo -e "${C_CYAN}>> 设备型号/主板信息:${C_RESET}"
+echo -e "${C_CYAN}>> 设备型号/主板信息:${C_RESET}" # 标题保留颜色
 model_info_found=0
 if [ $UBUS_PRESENT -eq 1 ]; then
     ubus_output=$(ubus call system board 2>/dev/null)
@@ -152,21 +152,23 @@ if [ $UBUS_PRESENT -eq 1 ]; then
         board=$(echo "$ubus_output" | jq -r '.board_name // empty')
         if [ -n "$model" ] || [ -n "$board" ]; then
              echo "  来源: ubus"
-             [ -n "$model" ] && echo "    型号: ${C_GREEN}${model}${C_RESET}"
-             [ -n "$board" ] && echo "    主板: ${C_GREEN}${board}${C_RESET}"
+             # *** 修改点：移除此处的颜色代码 ***
+             [ -n "$model" ] && echo "    型号: $model"
+             [ -n "$board" ] && echo "    主板: $board"
              model_info_found=1
         else
-             echo -e "  ${C_YELLOW}(ubus 未返回有效型号/主板信息)${C_RESET}"
+             echo -e "  ${C_YELLOW}(ubus 未返回有效型号/主板信息)${C_RESET}" # 警告保留颜色
         fi
     else
-         echo -e "  ${C_YELLOW}(ubus 命令执行失败或无输出)${C_RESET}"
+         echo -e "  ${C_YELLOW}(ubus 命令执行失败或无输出)${C_RESET}" # 警告保留颜色
     fi
 fi
 if [ $model_info_found -eq 0 ] && [ -f /tmp/sysinfo/model ]; then
     model_sysinfo=$(cat /tmp/sysinfo/model)
     if [ -n "$model_sysinfo" ]; then
         echo "  来源: /tmp/sysinfo/model"
-        echo "    型号: ${C_GREEN}${model_sysinfo}${C_RESET}"
+        # *** 修改点：移除此处的颜色代码 ***
+        echo "    型号: $model_sysinfo"
         model_info_found=1
     fi
 fi
@@ -174,38 +176,39 @@ if [ $model_info_found -eq 0 ] && [ -r /proc/device-tree/model ]; then
      model_dt=$(cat /proc/device-tree/model 2>/dev/null | tr -d '\0')
      if [ -n "$model_dt" ]; then
          echo "  来源: /proc/device-tree/model"
-         echo "    型号: ${C_GREEN}${model_dt}${C_RESET}"
+         # *** 修改点：移除此处的颜色代码 ***
+         echo "    型号: $model_dt"
          model_info_found=1
      fi
 fi
 if [ $model_info_found -eq 0 ]; then
-    echo -e "  ${C_YELLOW}无法自动确定设备型号或主板名称。${C_RESET}"
+    echo -e "  ${C_YELLOW}无法自动确定设备型号或主板名称。${C_RESET}" # 警告保留颜色
 fi
 echo
 
 # CPU 信息 (简化)
-echo -e "${C_CYAN}>> CPU:${C_RESET}"
-grep 'model name' /proc/cpuinfo | head -n1 | sed 's/^model name[[:space:]]*: /  /' || echo -e "  ${C_YELLOW}无法获取 CPU 型号。${C_RESET}"
+echo -e "${C_CYAN}>> CPU:${C_RESET}" # 标题保留颜色
+grep 'model name' /proc/cpuinfo | head -n1 | sed 's/^model name[[:space:]]*: /  /' || echo -e "  ${C_YELLOW}无法获取 CPU 型号。${C_RESET}" # 警告保留颜色
 echo
 
 # 内存信息
-echo -e "${C_CYAN}>> 内存信息:${C_RESET}"
+echo -e "${C_CYAN}>> 内存信息:${C_RESET}" # 标题保留颜色
 if command -v free >/dev/null 2>&1; then
-    free -h | sed 's/^/  /'
+    free -h | sed 's/^/  /' # 输出保留默认颜色
 else
-    echo -e "  ${C_YELLOW}(未找到 free 命令，尝试读取 /proc/meminfo)${C_RESET}"
-    grep -E 'MemTotal|MemFree|MemAvailable' /proc/meminfo | sed 's/^/  /' || echo -e "  ${C_YELLOW}无法获取内存信息。${C_RESET}"
+    echo -e "  ${C_YELLOW}(未找到 free 命令，尝试读取 /proc/meminfo)${C_RESET}" # 警告保留颜色
+    grep -E 'MemTotal|MemFree|MemAvailable' /proc/meminfo | sed 's/^/  /' || echo -e "  ${C_YELLOW}无法获取内存信息。${C_RESET}" # 警告保留颜色
 fi
 echo
 
 # 磁盘分区和挂载点信息 (lsblk)
-echo -e "${C_CYAN}>> 磁盘分区布局 (lsblk):${C_RESET}"
-lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT 2>/dev/null | sed 's/^/  /' || echo -e "  ${C_YELLOW}警告：${C_RESET}'lsblk' 命令执行失败或未安装。"
+echo -e "${C_CYAN}>> 磁盘分区布局 (lsblk):${C_RESET}" # 标题保留颜色
+lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT 2>/dev/null | sed 's/^/  /' || echo -e "  ${C_YELLOW}警告：${C_RESET}'lsblk' 命令执行失败或未安装。" # 警告保留颜色
 echo
 
 # 文件系统使用情况和类型 (df)
-echo -e "${C_CYAN}>> 文件系统使用情况 (df -hT):${C_RESET}"
-df -hT | sed 's/^/  /' || echo -e "  ${C_YELLOW}无法获取文件系统使用情况。${C_RESET}"
+echo -e "${C_CYAN}>> 文件系统使用情况 (df -hT):${C_RESET}" # 标题保留颜色
+df -hT | sed 's/^/  /' || echo -e "  ${C_YELLOW}无法获取文件系统使用情况。${C_RESET}" # 警告保留颜色
 echo
 
 echo -e "${C_BLUE}--- 步骤 2 完成 ---${C_RESET}"
@@ -329,9 +332,7 @@ KEEP_DATA_ALLOWED=1
 if [ -z "$AVAILABLE_KIB" ] || ! [[ "$AVAILABLE_KIB" =~ ^[0-9]+$ ]]; then
     echo -e "${C_YELLOW}警告：${C_RESET}无法准确获取 /tmp 可用空间。将允许用户选择是否保留配置。"
     KEEP_DATA_ALLOWED=1
-# *** 修改点：使用更新后的 THRESHOLD_KIB 变量 ***
 elif [ "$AVAILABLE_KIB" -lt "$THRESHOLD_KIB" ]; then
-    # *** 修改点：消息中的阈值会自动更新 ***
     echo -e "${C_YELLOW}警告：${C_RESET}/tmp 可用空间 (${C_YELLOW}${AVAILABLE_KIB}${C_RESET} KiB) 低于所需阈值 (${C_YELLOW}${THRESHOLD_KIB}${C_RESET} KiB)。"
     echo -e "      将强制【${C_B_YELLOW}不保留配置${C_RESET}】数据进行升级 (使用 -n 选项)。"
     SYSUPGRADE_ARGS="-n"; KEEP_DATA_ALLOWED=0;
