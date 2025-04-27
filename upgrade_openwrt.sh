@@ -37,17 +37,31 @@ cleanup() {
 # 在依赖项安装/检查步骤中会临时禁用此设置
 # set -e
 
-# *** 重新添加：脚本运行时首先清理旧的同名临时文件 ***
+# *** 修改点：扩展初始清理范围 ***
 echo
-echo -e "${C_BLUE}信息：${C_RESET}正在清理 /tmp 目录中可能存在的旧固件及校验文件..."
-# 只删除脚本将要使用的特定文件名的旧文件，避免误删其他文件
-rm -f "$IMAGE_PATH_GZ" "$IMAGE_PATH_IMG" "$CHECKSUM_PATH"
-echo -e "${C_BLUE}信息：${C_RESET}旧文件清理完成。"
-# *** 清理结束 ***
+echo -e "${C_YELLOW}警告：${C_RESET}脚本启动，即将清理 ${C_CYAN}${TMP_DIR}${C_RESET} 目录下的旧文件..."
 
-# --- 设置：如果任何命令失败则立即退出 ---
-# 在依赖项安装/检查步骤中会临时禁用此设置
-# set -e
+# 1. 清理可能存在的旧校验文件（特定名称）
+echo -e "${C_BLUE}信息：${C_RESET}  正在清理旧校验文件: ${C_CYAN}${CHECKSUM_PATH}${C_RESET}..."
+rm -f "$CHECKSUM_PATH"
+
+# 2. 清理 /tmp 中所有的 .img 和 .gz 文件 (有潜在风险!)
+echo -e "${C_B_YELLOW}警告：${C_RESET}  正在清理 ${C_CYAN}${TMP_DIR}${C_RESET} 目录下所有的 ${C_RED}*.img${C_RESET} 和 ${C_RED}*.gz${C_RESET} 文件！"
+echo -e "      ${C_YELLOW}这可能会删除与此脚本无关的文件，请确认 ${TMP_DIR} 中没有需要保留的同类文件！${C_RESET}"
+# 使用 /bin/rm 确保即使有别名也能执行删除，增加安全性；添加 -v 参数显示删除的文件（可选）
+/bin/rm -f ${TMP_DIR}/*.img ${TMP_DIR}/*.gz
+echo -e "${C_BLUE}信息：${C_RESET}  .img / .gz 文件清理完成。"
+
+# 3. 清理 /tmp 中名称包含 "upgrade" 或 "update" 的 .sh 脚本
+echo -e "${C_BLUE}信息：${C_RESET}  正在清理 ${C_CYAN}${TMP_DIR}${C_RESET} 目录下名称含 'upgrade' 或 'update' 的 .sh 脚本..."
+/bin/rm -f ${TMP_DIR}/*upgrade*.sh ${TMP_DIR}/*update*.sh
+echo -e "${C_BLUE}信息：${C_RESET}  相关 .sh 脚本清理完成。"
+
+# 4. 强调不清理 /root
+echo -e "${C_B_YELLOW}注意：${C_RESET}脚本【不会】清理 ${C_RED}/root${C_RESET} 目录下的任何文件。如有需要请手动清理。"
+
+echo -e "${C_B_GREEN}初始清理完成。${C_RESET}"
+# *** 清理结束 ***
 
 echo
 echo -e "${C_BLUE}=====================================================================${C_RESET}"
@@ -56,6 +70,7 @@ echo -e "${C_BLUE}==============================================================
 echo
 
 # --- 1. 检查并尝试安装依赖项 ---
+# ... (后续所有步骤 1 到 11 保持不变，与上一个版本相同) ...
 echo -e "${C_BLUE}--- 步骤 1: 检查并尝试安装依赖项 ---${C_RESET}"
 echo -e "${C_BLUE}信息：${C_RESET}检查所需工具 (wget, jq, gunzip, awk, sha256sum, lsblk)..."
 
@@ -79,15 +94,11 @@ echo -e "${C_BLUE}信息：${C_RESET}检测到包管理器: ${C_CYAN}${PKG_MANAG
 if command -v ubus >/dev/null 2>&1; then UBUS_PRESENT=1; fi
 
 update_run=0
-# *** 修改点：不再使用数组定义 required_cmds ***
-# required_cmds=( "wget" "jq" "gunzip" "awk" "sha256sum" "lsblk" )
+required_cmds=( "wget" "jq" "gunzip" "awk" "sha256sum" "lsblk" )
 missing_pkgs=()
 missing_cmds_found_initially=()
 
-echo "信息：正在检查所需的 命令 (wget, jq, gunzip, awk, sha256sum, lsblk) 并识别需要安装的 软件包..."
-# *** 修改点：直接在 for 循环中列出命令 ***
-for cmd_to_check in wget jq gunzip awk sha256sum lsblk; do
-    echo -e "${C_BLUE}信息：${C_RESET}  检查 命令 '${C_CYAN}${cmd_to_check}${C_RESET}'..." # 加颜色
+for cmd_to_check in "${required_cmds[@]}"; do
     if ! command -v "$cmd_to_check" >/dev/null 2>&1; then
         pkg_name=""
         if [ "$cmd_to_check" == "gunzip" ]; then pkg_name="gzip";
@@ -95,26 +106,10 @@ for cmd_to_check in wget jq gunzip awk sha256sum lsblk; do
         elif [ "$cmd_to_check" == "lsblk" ]; then pkg_name="lsblk";
         elif [ "$cmd_to_check" == "wget" ] || [ "$cmd_to_check" == "jq" ]; then pkg_name="$cmd_to_check"; fi
 
-        echo -e "  ${C_YELLOW}>> 命令 '$cmd_to_check' 未找到。${C_RESET}"
         missing_cmds_found_initially+=("$cmd_to_check")
-        if [ -n "$pkg_name" ]; then
-            echo -e "     这个命令通常由 软件包 '${C_YELLOW}${pkg_name}${C_RESET}' 提供。"
-            # 使用更兼容的方式检查元素是否已在列表中 (避免Bash 4+的 [[ =~ ]] )
-            is_missing=1
-            for existing_pkg in "${missing_pkgs[@]}"; do
-                if [ "$existing_pkg" == "$pkg_name" ]; then
-                    is_missing=0
-                    break
-                fi
-            done
-            if [ "$is_missing" -eq 1 ]; then
-                 missing_pkgs+=("$pkg_name")
-            fi
-        else
-             echo -e "     这个命令 ('$cmd_to_check') 通常由系统基础包 (如 busybox) 提供。"
+        if [ -n "$pkg_name" ] && ! [[ " ${missing_pkgs[@]} " =~ " ${pkg_name} " ]]; then
+             missing_pkgs+=("$pkg_name")
         fi
-    else
-        echo -e "  ${C_GREEN}>> 命令 '$cmd_to_check' 已找到。${C_RESET}"
     fi
 done
 
@@ -141,17 +136,8 @@ if [ ${#missing_pkgs[@]} -gt 0 ]; then
          elif [ "$cmd_to_recheck" == "lsblk" ]; then pkg_to_find="lsblk";
          elif [ "$cmd_to_recheck" == "wget" ]; then pkg_to_find="wget";
          elif [ "$cmd_to_recheck" == "jq" ]; then pkg_to_find="jq"; fi
-         # 检查 pkg_to_find 是否在我们尝试安装的列表里
-         should_check=0
-         for pkg_we_installed in "${missing_pkgs[@]}"; do
-             if [ "$pkg_we_installed" == "$pkg_to_find" ]; then
-                 should_check=1
-                 break
-             fi
-         done
-         # 如果是我们尝试安装的包对应的命令，并且它仍然不存在，则记录为最终缺失
-         if [ "$should_check" -eq 1 ] && ! command -v "$cmd_to_recheck" >/dev/null 2>&1; then
-             final_recheck_missing_cmds+=("$cmd_to_recheck")
+         if [[ " ${missing_pkgs[@]} " =~ " ${pkg_to_find} " ]]; then
+             if ! command -v "$cmd_to_recheck" >/dev/null 2>&1; then final_recheck_missing_cmds+=("$cmd_to_recheck"); fi
          fi
     done
     if [ ${#final_recheck_missing_cmds[@]} -gt 0 ]; then
@@ -165,16 +151,8 @@ if [ ${#missing_pkgs[@]} -gt 0 ]; then
 fi
 
 # 最终确认所有命令都存在
-echo "信息：依赖项最终检查..."
 final_check_missing_cmds=()
-# *** 修改点：直接迭代命令字符串列表进行最终检查 ***
-required_cmds_list="wget jq gunzip awk sha256sum lsblk"
-for cmd_to_verify in $required_cmds_list; do
-    if ! command -v "$cmd_to_verify" >/dev/null 2>&1; then
-        final_check_missing_cmds+=("$cmd_to_verify")
-    fi
-done
-
+for cmd_to_verify in "${required_cmds[@]}"; do if ! command -v "$cmd_to_verify" >/dev/null 2>&1; then final_check_missing_cmds+=("$cmd_to_verify"); fi; done
 if [ ${#final_check_missing_cmds[@]} -gt 0 ]; then
     final_missing_cmds_str=$(IFS=" "; echo "${final_check_missing_cmds[*]}")
     echo -e "${C_B_RED}错误：${C_RESET}脚本运行缺少必要的命令: ${C_RED}${final_missing_cmds_str}${C_RESET}" >&2
@@ -183,9 +161,6 @@ fi
 echo -e "${C_B_GREEN}信息：${C_RESET}所有必需的依赖项 (wget, jq, gunzip, awk, sha256sum, lsblk) 都已找到。"
 echo -e "${C_BLUE}--- 步骤 1 完成 ---${C_RESET}"
 echo
-
-# 启用严格错误检查
-set -e
 
 # --- 2. 显示系统和磁盘信息 ---
 echo -e "${C_BLUE}--- 步骤 2: 显示系统信息并检查内存 ---${C_RESET}"
@@ -266,9 +241,6 @@ echo
 
 # 启用严格错误检查
 set -e
-
-# --- 3. 临时增大 /tmp 分区 ---
-# ... (后续所有步骤 3 到 11 保持不变) ...
 
 # --- 3. 临时增大 /tmp 分区 ---
 echo -e "${C_BLUE}--- 步骤 3: 临时增大 /tmp 分区 ---${C_RESET}"
