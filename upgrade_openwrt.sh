@@ -37,29 +37,17 @@ cleanup() {
 # 在依赖项安装/检查步骤中会临时禁用此设置
 # set -e
 
-# *** 修改点：扩展初始清理范围 ***
+# *** 初始清理 /tmp ***
 echo
-echo -e "${C_YELLOW}警告：${C_RESET}脚本启动，即将清理 ${C_CYAN}${TMP_DIR}${C_RESET} 目录下的旧文件..."
-
-# 1. 清理可能存在的旧校验文件（特定名称）
-echo -e "${C_BLUE}信息：${C_RESET}  正在清理旧校验文件: ${C_CYAN}${CHECKSUM_PATH}${C_RESET}..."
-rm -f "$CHECKSUM_PATH"
-
-# 2. 清理 /tmp 中所有的 .img 和 .gz 文件 (有潜在风险!)
-echo -e "${C_B_YELLOW}警告：${C_RESET}  正在清理 ${C_CYAN}${TMP_DIR}${C_RESET} 目录下所有的 ${C_RED}*.img${C_RESET} 和 ${C_RED}*.gz${C_RESET} 文件！"
-echo -e "      ${C_YELLOW}这可能会删除与此脚本无关的文件，请确认 ${TMP_DIR} 中没有需要保留的同类文件！${C_RESET}"
-# 使用 /bin/rm 确保即使有别名也能执行删除，增加安全性；添加 -v 参数显示删除的文件（可选）
+echo -e "${C_BLUE}信息：${C_RESET}正在清理 /tmp 目录中可能存在的旧固件及校验文件..."
+rm -f "$IMAGE_PATH_GZ" "$IMAGE_PATH_IMG" "$CHECKSUM_PATH"
+echo -e "${C_YELLOW}警告：${C_RESET}  正在清理 /tmp 目录下所有的 ${C_RED}*.img${C_RESET} 和 ${C_RED}*.gz${C_RESET} 文件！"
 /bin/rm -f ${TMP_DIR}/*.img ${TMP_DIR}/*.gz
 echo -e "${C_BLUE}信息：${C_RESET}  .img / .gz 文件清理完成。"
-
-# 3. 清理 /tmp 中名称包含 "upgrade" 或 "update" 的 .sh 脚本
-echo -e "${C_BLUE}信息：${C_RESET}  正在清理 ${C_CYAN}${TMP_DIR}${C_RESET} 目录下名称含 'upgrade' 或 'update' 的 .sh 脚本..."
+echo -e "${C_BLUE}信息：${C_RESET}  正在清理 /tmp 目录下名称含 'upgrade' 或 'update' 的 .sh 脚本..."
 /bin/rm -f ${TMP_DIR}/*upgrade*.sh ${TMP_DIR}/*update*.sh
 echo -e "${C_BLUE}信息：${C_RESET}  相关 .sh 脚本清理完成。"
-
-# 4. 强调不清理 /root
 echo -e "${C_B_YELLOW}注意：${C_RESET}脚本【不会】清理 ${C_RED}/root${C_RESET} 目录下的任何文件。如有需要请手动清理。"
-
 echo -e "${C_B_GREEN}初始清理完成。${C_RESET}"
 # *** 清理结束 ***
 
@@ -69,8 +57,7 @@ echo -e "${C_BLUE} OpenWRT/ImmortalWrt 自动升级脚本 ${C_RESET}"
 echo -e "${C_BLUE}=====================================================================${C_RESET}"
 echo
 
-# --- 1. 检查并尝试安装依赖项 ---
-# ... (后续所有步骤 1 到 11 保持不变，与上一个版本相同) ...
+# --- 1. 检查并尝试安装依赖项 (使用字符串代替数组) ---
 echo -e "${C_BLUE}--- 步骤 1: 检查并尝试安装依赖项 ---${C_RESET}"
 echo -e "${C_BLUE}信息：${C_RESET}检查所需工具 (wget, jq, gunzip, awk, sha256sum, lsblk)..."
 
@@ -79,26 +66,27 @@ UPDATE_CMD=""
 INSTALL_CMD=""
 UBUS_PRESENT=0
 
-# 检测包管理器
+# 检测包管理器 (不变)
 if command -v opkg >/dev/null 2>&1; then
     PKG_MANAGER="opkg"; UPDATE_CMD="opkg update"; INSTALL_CMD="opkg install";
 elif command -v apk >/dev/null 2>&1; then
     PKG_MANAGER="apk"; UPDATE_CMD="apk update"; INSTALL_CMD="apk add";
 else
-    echo -e "${C_B_RED}错误：${C_RESET}无法检测到 'opkg' 或 'apk' 包管理器。" >&2
-    echo -e "请确保其中一个已安装并位于 PATH 中，或手动安装依赖项 (wget, jq, gzip, coreutils, lsblk)。awk 通常包含在 busybox 中。" >&2
-    exit 1
+    echo -e "${C_B_RED}错误：${C_RESET}无法检测到 'opkg' 或 'apk' 包管理器。" >&2; exit 1;
 fi
 echo -e "${C_BLUE}信息：${C_RESET}检测到包管理器: ${C_CYAN}${PKG_MANAGER}${C_RESET}"
 
 if command -v ubus >/dev/null 2>&1; then UBUS_PRESENT=1; fi
 
 update_run=0
-required_cmds=( "wget" "jq" "gunzip" "awk" "sha256sum" "lsblk" )
-missing_pkgs=()
-missing_cmds_found_initially=()
+# *** 修改点：使用字符串代替数组 ***
+missing_pkgs_str=""                 # 空格分隔的待安装包名
+missing_cmds_found_initially_str="" # 空格分隔的初始缺失命令名
+required_cmds_list="wget jq gunzip awk sha256sum lsblk" # 需要检查的命令列表字符串
 
-for cmd_to_check in "${required_cmds[@]}"; do
+echo "信息：正在检查所需的 命令 ($required_cmds_list) 并识别需要安装的 软件包..."
+for cmd_to_check in $required_cmds_list; do # 直接迭代字符串列表
+    echo -e "${C_BLUE}信息：${C_RESET}  检查 命令 '${C_CYAN}${cmd_to_check}${C_RESET}'..."
     if ! command -v "$cmd_to_check" >/dev/null 2>&1; then
         pkg_name=""
         if [ "$cmd_to_check" == "gunzip" ]; then pkg_name="gzip";
@@ -106,16 +94,29 @@ for cmd_to_check in "${required_cmds[@]}"; do
         elif [ "$cmd_to_check" == "lsblk" ]; then pkg_name="lsblk";
         elif [ "$cmd_to_check" == "wget" ] || [ "$cmd_to_check" == "jq" ]; then pkg_name="$cmd_to_check"; fi
 
-        missing_cmds_found_initially+=("$cmd_to_check")
-        if [ -n "$pkg_name" ] && ! [[ " ${missing_pkgs[@]} " =~ " ${pkg_name} " ]]; then
-             missing_pkgs+=("$pkg_name")
+        echo -e "  ${C_YELLOW}>> 命令 '$cmd_to_check' 未找到。${C_RESET}"
+        # 追加缺失命令到字符串
+        [ -n "$missing_cmds_found_initially_str" ] && missing_cmds_found_initially_str="$missing_cmds_found_initially_str "
+        missing_cmds_found_initially_str="$missing_cmds_found_initially_str$cmd_to_check"
+
+        if [ -n "$pkg_name" ]; then
+            echo -e "     这个命令通常由 软件包 '${C_YELLOW}${pkg_name}${C_RESET}' 提供。"
+            # 检查包名是否已在待安装列表字符串中 (使用 grep)
+            if ! echo " $missing_pkgs_str " | grep -q " $pkg_name "; then
+                 # 追加缺失包名到字符串
+                 [ -n "$missing_pkgs_str" ] && missing_pkgs_str="$missing_pkgs_str "
+                 missing_pkgs_str="$missing_pkgs_str$pkg_name"
+            fi
+        else
+             echo -e "     这个命令 ('$cmd_to_check') 通常由系统基础包 (如 busybox) 提供。"
         fi
+    else
+        echo -e "  ${C_GREEN}>> 命令 '$cmd_to_check' 已找到。${C_RESET}"
     fi
 done
 
 # --- 尝试安装缺失的软件包 ---
-if [ ${#missing_pkgs[@]} -gt 0 ]; then
-    missing_pkgs_str=$(IFS=" "; echo "${missing_pkgs[*]}")
+if [ -n "$missing_pkgs_str" ]; then # 检查字符串是否非空
     echo -e "${C_YELLOW}警告：${C_RESET}检测到缺失必需的软件包: ${C_CYAN}${missing_pkgs_str}${C_RESET}"
     echo -e "${C_BLUE}信息：${C_RESET}正在尝试使用 '$PKG_MANAGER' 进行安装 (需要 root 权限和网络)..."
     if [ "$update_run" -eq 0 ]; then
@@ -125,25 +126,33 @@ if [ ${#missing_pkgs[@]} -gt 0 ]; then
         update_run=1
     fi
     echo -e "${C_BLUE}信息：${C_RESET}  正在运行安装命令 (${C_CYAN}${INSTALL_CMD} ${missing_pkgs_str}${C_RESET})..."
-    set +e; $INSTALL_CMD ${missing_pkgs_str}; install_status=$?; set -e
+    set +e; $INSTALL_CMD $missing_pkgs_str; install_status=$?; set -e # 使用包名字符串
     if [ $install_status -ne 0 ]; then echo -e "${C_YELLOW}警告：${C_RESET}  软件包安装命令退出码为 $install_status。"; fi
 
-    final_recheck_missing_cmds=()
-    for cmd_to_recheck in "${missing_cmds_found_initially[@]}"; do
-         pkg_to_find=""
-         if [ "$cmd_to_recheck" == "gunzip" ]; then pkg_to_find="gzip";
-         elif [ "$cmd_to_recheck" == "sha256sum" ]; then pkg_to_find="coreutils";
-         elif [ "$cmd_to_recheck" == "lsblk" ]; then pkg_to_find="lsblk";
-         elif [ "$cmd_to_recheck" == "wget" ]; then pkg_to_find="wget";
-         elif [ "$cmd_to_recheck" == "jq" ]; then pkg_to_find="jq"; fi
-         if [[ " ${missing_pkgs[@]} " =~ " ${pkg_to_find} " ]]; then
-             if ! command -v "$cmd_to_recheck" >/dev/null 2>&1; then final_recheck_missing_cmds+=("$cmd_to_recheck"); fi
-         fi
+    # 重新检查依赖项
+    echo "信息：正在重新检查依赖项..."
+    final_recheck_missing_cmds_str=""
+    # 迭代初始缺失的命令字符串
+    for cmd_to_recheck in $missing_cmds_found_initially_str; do
+        if ! command -v "$cmd_to_recheck" >/dev/null 2>&1; then
+             # 检查这个命令对应的包是否在我们尝试安装的列表里
+             pkg_to_find=""
+             if [ "$cmd_to_recheck" == "gunzip" ]; then pkg_to_find="gzip";
+             elif [ "$cmd_to_recheck" == "sha256sum" ]; then pkg_to_find="coreutils";
+             elif [ "$cmd_to_recheck" == "lsblk" ]; then pkg_to_find="lsblk";
+             elif [ "$cmd_to_recheck" == "wget" ]; then pkg_to_find="wget";
+             elif [ "$cmd_to_recheck" == "jq" ]; then pkg_to_find="jq"; fi
+
+             if [ -n "$pkg_to_find" ] && echo " $missing_pkgs_str " | grep -q " $pkg_to_find "; then
+                  # 如果是我们尝试安装的包对应的命令，并且现在还找不到，则记录最终缺失
+                  [ -n "$final_recheck_missing_cmds_str" ] && final_recheck_missing_cmds_str="$final_recheck_missing_cmds_str "
+                  final_recheck_missing_cmds_str="$final_recheck_missing_cmds_str$cmd_to_recheck"
+             fi
+        fi
     done
-    if [ ${#final_recheck_missing_cmds[@]} -gt 0 ]; then
-         final_missing_cmds_str=$(IFS=" "; echo "${final_recheck_missing_cmds[*]}")
+    if [ -n "$final_recheck_missing_cmds_str" ]; then
          echo -e "${C_B_RED}错误：${C_RESET}必需的依赖项安装失败或仍然缺失。" >&2
-         echo -e "       仍然缺失以下命令: ${C_RED}${final_missing_cmds_str}${C_RESET}" >&2
+         echo -e "       仍然缺失以下命令: ${C_RED}${final_recheck_missing_cmds_str}${C_RESET}" >&2
          exit 1
      else
          echo -e "${C_B_GREEN}信息：${C_RESET}所有尝试安装的必需软件包似乎都已成功安装。"
@@ -151,16 +160,26 @@ if [ ${#missing_pkgs[@]} -gt 0 ]; then
 fi
 
 # 最终确认所有命令都存在
-final_check_missing_cmds=()
-for cmd_to_verify in "${required_cmds[@]}"; do if ! command -v "$cmd_to_verify" >/dev/null 2>&1; then final_check_missing_cmds+=("$cmd_to_verify"); fi; done
-if [ ${#final_check_missing_cmds[@]} -gt 0 ]; then
-    final_missing_cmds_str=$(IFS=" "; echo "${final_check_missing_cmds[*]}")
-    echo -e "${C_B_RED}错误：${C_RESET}脚本运行缺少必要的命令: ${C_RED}${final_missing_cmds_str}${C_RESET}" >&2
+echo "信息：依赖项最终检查..."
+final_check_missing_cmds_str=""
+# *** 修改点：直接迭代命令字符串列表进行最终检查 ***
+for cmd_to_verify in $required_cmds_list; do
+    if ! command -v "$cmd_to_verify" >/dev/null 2>&1; then
+        [ -n "$final_check_missing_cmds_str" ] && final_check_missing_cmds_str="$final_check_missing_cmds_str "
+        final_check_missing_cmds_str="$final_check_missing_cmds_str$cmd_to_verify"
+    fi
+done
+
+if [ -n "$final_check_missing_cmds_str" ]; then # 检查字符串是否非空
+    echo -e "${C_B_RED}错误：${C_RESET}脚本运行缺少必要的命令: ${C_RED}${final_check_missing_cmds_str}${C_RESET}" >&2
     exit 1
 fi
-echo -e "${C_B_GREEN}信息：${C_RESET}所有必需的依赖项 (wget, jq, gunzip, awk, sha256sum, lsblk) 都已找到。"
+echo -e "${C_B_GREEN}信息：${C_RESET}所有必需的依赖项 ($required_cmds_list) 都已找到。"
 echo -e "${C_BLUE}--- 步骤 1 完成 ---${C_RESET}"
 echo
+
+# 启用严格错误检查
+set -e
 
 # --- 2. 显示系统和磁盘信息 ---
 echo -e "${C_BLUE}--- 步骤 2: 显示系统信息并检查内存 ---${C_RESET}"
