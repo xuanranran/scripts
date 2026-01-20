@@ -23,6 +23,51 @@ CHECKSUM_PATH="$TMP_DIR/$CHECKSUM_FILENAME"                                # 校
 THRESHOLD_KIB=614400                                                       # 保留数据的空间阈值 (600 MiB in KiB)
 MEM_THRESHOLD_KIB=1048576                                                  # 运行脚本的最低内存阈值 (1 GiB = 1024*1024 KiB)
 
+# GitHub 访问方式配置（将在用户选择后设置）
+GITHUB_PROXY=""  # GitHub 代理前缀
+
+# --- 选择 GitHub 访问方式 ---
+select_github_access() {
+    echo
+    echo -e "${C_CYAN}╔═══════════════════════════════════════════════════════════════════════╗${C_RESET}"
+    echo -e "${C_CYAN}║${C_RESET}                 ${C_B_YELLOW}[🌐] GitHub 访问方式选择${C_RESET}                    ${C_CYAN}║${C_RESET}"
+    echo -e "${C_CYAN}╚═══════════════════════════════════════════════════════════════════════╝${C_RESET}"
+    echo
+    echo -e "${C_CYAN}┌───────────────────────────────────────────────────────────────────────┐${C_RESET}"
+    echo -e "${C_CYAN}│${C_RESET} ${C_B_BLUE}选择下载方式${C_RESET}                                                      ${C_CYAN}│${C_RESET}"
+    echo -e "${C_CYAN}├───────────────────────────────────────────────────────────────────────┤${C_RESET}"
+    echo -e "${C_CYAN}│${C_RESET}                                                                       ${C_CYAN}│${C_RESET}"
+    echo -e "${C_CYAN}│${C_RESET}  ${C_GREEN}1)${C_RESET} ${C_B_GREEN}gh-proxy.com 镜像加速${C_RESET} ${C_YELLOW}(推荐)${C_RESET}                             ${C_CYAN}│${C_RESET}"
+    echo -e "${C_CYAN}│${C_RESET}     ${C_CYAN}•${C_RESET} 适合网络受限环境                                           ${C_CYAN}│${C_RESET}"
+    echo -e "${C_CYAN}│${C_RESET}     ${C_CYAN}•${C_RESET} 下载速度更快                                               ${C_CYAN}│${C_RESET}"
+    echo -e "${C_CYAN}│${C_RESET}                                                                       ${C_CYAN}│${C_RESET}"
+    echo -e "${C_CYAN}│${C_RESET}  ${C_BLUE}2)${C_RESET} GitHub 官方直连                                              ${C_CYAN}│${C_RESET}"
+    echo -e "${C_CYAN}│${C_RESET}     ${C_CYAN}•${C_RESET} 需要稳定的国际网络连接                                     ${C_CYAN}│${C_RESET}"
+    echo -e "${C_CYAN}│${C_RESET}     ${C_CYAN}•${C_RESET} 直接从官方服务器下载                                       ${C_CYAN}│${C_RESET}"
+    echo -e "${C_CYAN}│${C_RESET}                                                                       ${C_CYAN}│${C_RESET}"
+    echo -e "${C_CYAN}└───────────────────────────────────────────────────────────────────────┘${C_RESET}"
+    echo
+    read -p "$(echo -e "${C_YELLOW}❓ 请选择访问方式 [1-2] (默认: ${C_B_GREEN}1${C_RESET}${C_YELLOW}): ${C_RESET}")" github_choice
+    github_choice=${github_choice:-1}
+    
+    echo
+    case "$github_choice" in
+        1)
+            echo -e "${C_B_GREEN}✓ 已选择：${C_RESET}gh-proxy.com 镜像加速"
+            GITHUB_PROXY="https://gh-proxy.com/"
+            ;;
+        2)
+            echo -e "${C_B_GREEN}✓ 已选择：${C_RESET}GitHub 官方直连"
+            GITHUB_PROXY=""
+            ;;
+        *)
+            echo -e "${C_YELLOW}⚠ 无效选项，使用默认方式：${C_RESET}gh-proxy.com 镜像加速"
+            GITHUB_PROXY="https://gh-proxy.com/"
+            ;;
+    esac
+    echo
+}
+
 # --- 退出脚本时清理临时文件 ---
 cleanup() {
   # 这个函数会在脚本退出时执行，清理本次运行产生的文件
@@ -174,7 +219,16 @@ if [ -n "$final_check_missing_cmds_str" ]; then # 检查字符串是否非空
     echo -e "${C_B_RED}错误：${C_RESET}脚本运行缺少必要的命令: ${C_RED}${final_check_missing_cmds_str}${C_RESET}" >&2
     exit 1
 fi
-echo -e "${C_B_GREEN}信息：${C_RESET}所有必需的依赖项 ($required_cmds_list) 都已找到。"
+
+# 显示依赖项检查总结表格
+echo
+echo -e "${C_CYAN}┌──────────────────────────┬────────────────────────────────────────────┐${C_RESET}"
+echo -e "${C_CYAN}│${C_RESET} ${C_B_BLUE}依赖项检查总结${C_RESET}           ${C_CYAN}│${C_RESET} ${C_B_BLUE}状态${C_RESET}                                   ${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}╞══════════════════════════╪════════════════════════════════════════════╡${C_RESET}"
+printf "${C_CYAN}│${C_RESET} ${C_GREEN}[√]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_GREEN}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "包管理器" "$PKG_MANAGER"
+echo -e "${C_CYAN}├──────────────────────────┼────────────────────────────────────────────┤${C_RESET}"
+printf "${C_CYAN}│${C_RESET} ${C_GREEN}[√]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_GREEN}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "必需命令" "已找到所有依赖 ($required_cmds_list)"
+echo -e "${C_CYAN}└──────────────────────────┴────────────────────────────────────────────┘${C_RESET}"
 echo -e "${C_BLUE}--- 步骤 1 完成 ---${C_RESET}"
 echo
 
@@ -255,8 +309,69 @@ echo -e "${C_CYAN}>> 文件系统使用情况 (df -hT):${C_RESET}"
 df -hT | sed 's/^/  /' || echo -e "  ${C_YELLOW}无法获取文件系统使用情况。${C_RESET}"
 echo
 
+# 系统信息总结表格
+echo
+echo -e "${C_CYAN}┌──────────────────────────┬────────────────────────────────────────────┐${C_RESET}"
+echo -e "${C_CYAN}│${C_RESET} ${C_B_BLUE}系统信息总结${C_RESET}             ${C_CYAN}│${C_RESET} ${C_B_BLUE}详情${C_RESET}                                   ${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}╞══════════════════════════╪════════════════════════════════════════════╡${C_RESET}"
+
+# 内存信息
+if [ -n "$mem_total_kib" ]; then
+    mem_total_mib=$(awk -v total_kib="$mem_total_kib" 'BEGIN { printf "%.0f MiB", total_kib/1024 }')
+    if [ -n "$mem_avail_kib" ]; then
+        mem_avail_mib=$(awk -v avail_kib="$mem_avail_kib" 'BEGIN { printf "%.0f MiB", avail_kib/1024 }')
+        printf "${C_CYAN}│${C_RESET} ${C_GREEN}[√]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_GREEN}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "内存" "总计: $mem_total_mib / 可用: $mem_avail_mib"
+    else
+        printf "${C_CYAN}│${C_RESET} ${C_GREEN}[√]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_GREEN}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "内存" "总计: $mem_total_mib"
+    fi
+else
+    printf "${C_CYAN}│${C_RESET} ${C_YELLOW}[-]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_YELLOW}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "内存" "无法获取"
+fi
+
+echo -e "${C_CYAN}├──────────────────────────┼────────────────────────────────────────────┤${C_RESET}"
+
+# 设备型号
+if [ $model_info_found -eq 1 ]; then
+    if [ -n "$model" ]; then
+        # 截断过长的型号名
+        if [ ${#model} -gt 42 ]; then
+            model_display="${model:0:39}..."
+        else
+            model_display="$model"
+        fi
+        printf "${C_CYAN}│${C_RESET} ${C_GREEN}[√]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_GREEN}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "设备型号" "$model_display"
+    elif [ -n "$model_sysinfo" ]; then
+        if [ ${#model_sysinfo} -gt 42 ]; then
+            model_display="${model_sysinfo:0:39}..."
+        else
+            model_display="$model_sysinfo"
+        fi
+        printf "${C_CYAN}│${C_RESET} ${C_GREEN}[√]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_GREEN}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "设备型号" "$model_display"
+    else
+        printf "${C_CYAN}│${C_RESET} ${C_YELLOW}[-]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_YELLOW}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "设备型号" "未知"
+    fi
+else
+    printf "${C_CYAN}│${C_RESET} ${C_YELLOW}[-]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_YELLOW}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "设备型号" "无法确定"
+fi
+
+echo -e "${C_CYAN}├──────────────────────────┼────────────────────────────────────────────┤${C_RESET}"
+
+# /tmp 空间
+tmp_size=$(df -h /tmp 2>/dev/null | awk 'NR==2 {print $2}')
+tmp_avail=$(df -h /tmp 2>/dev/null | awk 'NR==2 {print $4}')
+if [ -n "$tmp_size" ] && [ -n "$tmp_avail" ]; then
+    printf "${C_CYAN}│${C_RESET} ${C_GREEN}[√]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_GREEN}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "/tmp 空间" "总计: $tmp_size / 可用: $tmp_avail"
+else
+    printf "${C_CYAN}│${C_RESET} ${C_YELLOW}[-]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_YELLOW}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "/tmp 空间" "无法获取"
+fi
+
+echo -e "${C_CYAN}└──────────────────────────┴────────────────────────────────────────────┘${C_RESET}"
+
 echo -e "${C_BLUE}--- 步骤 2 完成 ---${C_RESET}"
 echo
+
+# 选择 GitHub 访问方式
+select_github_access
 
 # 启用严格错误检查
 set -e
@@ -291,7 +406,7 @@ echo
 # --- 4. 获取最新 Release 信息 ---
 echo -e "${C_BLUE}--- 步骤 4: 获取最新 Release 信息 ---${C_RESET}"
 echo -e "${C_BLUE}信息：${C_RESET}正在从 GitHub 仓库 '${C_CYAN}${REPO}${C_RESET}' 获取最新版本信息..."
-API_URL="https://api.github.com/repos/$REPO/releases/latest"
+API_URL="${GITHUB_PROXY}https://api.github.com/repos/$REPO/releases/latest"
 RELEASE_INFO=$(wget -qO- --no-check-certificate "$API_URL")
 if [ -z "$RELEASE_INFO" ]; then echo -e "${C_B_RED}错误：${C_RESET}无法从 GitHub API 获取版本信息。" >&2; exit 1; fi
 RELEASE_TAG=$(echo "$RELEASE_INFO" | jq -r '.tag_name // "未知标签"')
@@ -318,16 +433,24 @@ echo
 echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
 echo -e "${C_B_YELLOW}[↓] 固件下载确认${C_RESET}"
 echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
-echo -e "  ${C_BLUE}已找到固件文件，详情如下：${C_RESET}"
-echo -e "  ${C_CYAN}•${C_RESET} 版本标签: ${C_GREEN}${RELEASE_TAG}${C_RESET}"
-echo -e "  ${C_CYAN}•${C_RESET} 固件链接: ${C_CYAN}${IMAGE_URL}${C_RESET}"
+echo
+echo -e "${C_CYAN}┌──────────────────────────┬────────────────────────────────────────────┐${C_RESET}"
+echo -e "${C_CYAN}│${C_RESET} ${C_B_BLUE}项目${C_RESET}                     ${C_CYAN}│${C_RESET} ${C_B_BLUE}详情${C_RESET}                                   ${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}╞══════════════════════════╪════════════════════════════════════════════╡${C_RESET}"
+printf "${C_CYAN}│${C_RESET} ${C_CYAN}[#]${C_RESET} %-20s ${C_CYAN}│${C_RESET} " "版本标签"
+echo -e "${C_GREEN}${RELEASE_TAG}${C_RESET}$(printf '%*s' $((42 - ${#RELEASE_TAG})) '') ${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}├──────────────────────────┼────────────────────────────────────────────┤${C_RESET}"
+printf "${C_CYAN}│${C_RESET} ${C_CYAN}[↓]${C_RESET} %-20s ${C_CYAN}│${C_RESET} %-42s ${C_CYAN}│${C_RESET}\\n" "固件文件" "$(basename "$IMAGE_FILENAME_GZ")"
+echo -e "${C_CYAN}├──────────────────────────┼────────────────────────────────────────────┤${C_RESET}"
 if [ $SKIP_CHECKSUM -eq 1 ]; then 
-    echo -e "  ${C_CYAN}•${C_RESET} 校验文件: ${C_YELLOW}未找到${C_RESET}"
+    printf "${C_CYAN}│${C_RESET} ${C_YELLOW}[-]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_YELLOW}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "校验文件" "未找到"
 else 
-    echo -e "  ${C_CYAN}•${C_RESET} 校验链接: ${C_CYAN}${CHECKSUM_URL}${C_RESET}"
+    printf "${C_CYAN}│${C_RESET} ${C_GREEN}[√]${C_RESET} %-20s ${C_CYAN}│${C_RESET} %-42s ${C_CYAN}│${C_RESET}\\n" "校验文件" "$(basename "$CHECKSUM_FILENAME")"
 fi
-echo -e "  ${C_CYAN}•${C_RESET} 目标路径: ${C_CYAN}${IMAGE_PATH_GZ}${C_RESET}"
-echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
+echo -e "${C_CYAN}├──────────────────────────┼────────────────────────────────────────────┤${C_RESET}"
+printf "${C_CYAN}│${C_RESET} ${C_CYAN}[>]${C_RESET} %-20s ${C_CYAN}│${C_RESET} %-42s ${C_CYAN}│${C_RESET}\\n" "保存路径" "$TMP_DIR"
+echo -e "${C_CYAN}└──────────────────────────┴────────────────────────────────────────────┘${C_RESET}"
+echo
 read -p "$(echo -e "\n${C_YELLOW}❓ 是否开始下载此固件文件？(Y/n) [默认: ${C_B_GREEN}是${C_RESET}${C_YELLOW}]: ${C_RESET}")" confirm_download
 confirm_download=${confirm_download:-Y}  # 默认为Y
 if [[ ! "$confirm_download" =~ ^[Yy]$ ]]; then echo -e "${C_YELLOW}操作已取消，未下载固件。${C_RESET}"; exit 0; fi
@@ -378,8 +501,15 @@ else
              SKIP_CHECKSUM=1
         else
             CALCULATED_SUM=$(sha256sum "$IMAGE_PATH_GZ" | awk '{print $1}')
-            echo -e "  >> ${C_BLUE}期望 SHA256:${C_RESET} ${EXPECTED_SUM}"
-            echo -e "  >> ${C_BLUE}计算 SHA256:${C_RESET} ${CALCULATED_SUM}"
+            echo
+            echo -e "${C_CYAN}┌──────────────────────────┬────────────────────────────────────────────┐${C_RESET}"
+            echo -e "${C_CYAN}│${C_RESET} ${C_B_BLUE}校验项${C_RESET}                   ${C_CYAN}│${C_RESET} ${C_B_BLUE}SHA256 哈希值${C_RESET}                          ${C_CYAN}│${C_RESET}"
+            echo -e "${C_CYAN}╞══════════════════════════╪════════════════════════════════════════════╡${C_RESET}"
+            printf "${C_CYAN}│${C_RESET} ${C_CYAN}[>]${C_RESET} %-20s ${C_CYAN}│${C_RESET} %-42s ${C_CYAN}│${C_RESET}\\n" "期望值" "$EXPECTED_SUM"
+            echo -e "${C_CYAN}├──────────────────────────┼────────────────────────────────────────────┤${C_RESET}"
+            printf "${C_CYAN}│${C_RESET} ${C_CYAN}[>]${C_RESET} %-20s ${C_CYAN}│${C_RESET} %-42s ${C_CYAN}│${C_RESET}\\n" "计算值" "$CALCULATED_SUM"
+            echo -e "${C_CYAN}└──────────────────────────┴────────────────────────────────────────────┘${C_RESET}"
+            echo
             if [ "$EXPECTED_SUM" == "$CALCULATED_SUM" ]; then
                 echo -e "${C_B_GREEN}✅ 校验成功！文件完整。${C_RESET}"
             else
