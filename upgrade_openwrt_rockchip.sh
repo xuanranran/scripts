@@ -77,6 +77,100 @@ select_github_access() {
     echo
 }
 
+# --- 选择 Docker 版本 ---
+select_docker_version() {
+    echo
+    echo -e "${C_CYAN}╔═══════════════════════════════════════════════════════════════════════╗${C_RESET}"
+    echo -e "${C_CYAN}║${C_RESET}                  ${C_B_YELLOW}[🐳] Docker 版本选择${C_RESET}                       ${C_CYAN}║${C_RESET}"
+    echo -e "${C_CYAN}╚═══════════════════════════════════════════════════════════════════════╝${C_RESET}"
+    echo
+    echo -e "${C_CYAN}┌───────────────────────────────────────────────────────────────────────┐${C_RESET}"
+    echo -e "${C_CYAN}│${C_RESET} ${C_B_BLUE}选择固件类型${C_RESET}                                                      ${C_CYAN}│${C_RESET}"
+    echo -e "${C_CYAN}├───────────────────────────────────────────────────────────────────────┤${C_RESET}"
+    echo -e "${C_CYAN}│${C_RESET}                                                                       ${C_CYAN}│${C_RESET}"
+    echo -e "${C_CYAN}│${C_RESET}  ${C_GREEN}1)${C_RESET} ${C_B_GREEN}标准版固件${C_RESET} ${C_YELLOW}(推荐)${C_RESET}                                       ${C_CYAN}│${C_RESET}"
+    echo -e "${C_CYAN}│${C_RESET}     ${C_CYAN}•${C_RESET} 常规OpenWrt固件                                            ${C_CYAN}│${C_RESET}"
+    echo -e "${C_CYAN}│${C_RESET}     ${C_CYAN}•${C_RESET} 适合大多数用户                                              ${C_CYAN}│${C_RESET}"
+    echo -e "${C_CYAN}│${C_RESET}                                                                       ${C_CYAN}│${C_RESET}"
+    echo -e "${C_CYAN}│${C_RESET}  ${C_BLUE}2)${C_RESET} Docker 版本固件                                               ${C_CYAN}│${C_RESET}"
+    echo -e "${C_CYAN}│${C_RESET}     ${C_CYAN}•${C_RESET} 包含Docker支持                                              ${C_CYAN}│${C_RESET}"
+    echo -e "${C_CYAN}│${C_RESET}     ${C_CYAN}•${C_RESET} 适合需要运行Docker容器的用户                                ${C_CYAN}│${C_RESET}"
+    echo -e "${C_CYAN}│${C_RESET}                                                                       ${C_CYAN}│${C_RESET}"
+    echo -e "${C_CYAN}└───────────────────────────────────────────────────────────────────────┘${C_RESET}"
+    echo
+    read -p "$(echo -e "${C_YELLOW}❓ 请选择固件类型 [1-2] (默认: ${C_B_GREEN}1${C_RESET}${C_YELLOW}): ${C_RESET}")" docker_choice
+    docker_choice=${docker_choice:-1}
+    
+    echo
+    case "$docker_choice" in
+        1)
+            echo -e "${C_B_GREEN}✓ 已选择：${C_RESET}标准版固件"
+            USE_DOCKER=false
+            ;;
+        2)
+            echo -e "${C_B_GREEN}✓ 已选择：${C_RESET}Docker 版本固件"
+            USE_DOCKER=true
+            ;;
+        *)
+            echo -e "${C_YELLOW}⚠ 无效选项，使用默认：${C_RESET}标准版固件"
+            USE_DOCKER=false
+            ;;
+    esac
+    echo
+}
+
+# --- 检测设备型号 ---
+detect_device_model() {
+    echo -e "${C_BLUE}信息：${C_RESET}正在检测设备型号..."
+    
+    local detected_model=""
+    local board_name=""
+    
+    # 优先从 /proc/device-tree/model 读取
+    if [ -r /proc/device-tree/model ]; then
+        detected_model=$(cat /proc/device-tree/model 2>/dev/null | tr -d '\0')
+        echo -e "${C_BLUE}信息：${C_RESET}从 /proc/device-tree/model 读取: ${C_CYAN}${detected_model}${C_RESET}"
+    fi
+    
+    # 如果未获取到，尝试从 openwrt_release 读取
+    if [ -z "$detected_model" ] && [ -f /etc/openwrt_release ]; then
+        . /etc/openwrt_release
+        if [ -n "$DISTRIB_TARGET" ]; then
+            detected_model="$DISTRIB_TARGET"
+            echo -e "${C_BLUE}信息：${C_RESET}从 /etc/openwrt_release 读取: ${C_CYAN}${detected_model}${C_RESET}"
+        fi
+    fi
+    
+    # 尝试从ubus获取board_name
+    if command -v ubus >/dev/null 2>&1; then
+        board_name=$(ubus call system board 2>/dev/null | jq -r '.board_name // empty')
+        if [ -n "$board_name" ]; then
+            echo -e "${C_BLUE}信息：${C_RESET}从 ubus 读取 board_name: ${C_CYAN}${board_name}${C_RESET}"
+        fi
+    fi
+    
+    # 根据检测到的信息映射到固件文件名格式
+    # 固件文件名格式: immortalwrt-rockchip-armv8-{model}-squashfs-sysupgrade.img.gz
+    # 需要从board_name或其他信息中提取{model}部分
+    
+    if [ -n "$board_name" ]; then
+        # board_name通常已经是正确的格式，如 "friendlyarm_nanopi-r5s"
+        DEVICE_MODEL="$board_name"
+    elif [ -n "$detected_model" ]; then
+        # 如果只有model名称，尝试简单转换
+        # 这里需要根据实际情况调整映射逻辑
+        echo -e "${C_YELLOW}警告：${C_RESET}无法从ubus获取board_name，尝试使用检测到的型号"
+        DEVICE_MODEL="$detected_model"
+    else
+        echo -e "${C_B_RED}错误：${C_RESET}无法检测设备型号" >&2
+        echo -e "${C_YELLOW}提示：${C_RESET}请手动指定设备型号或检查系统信息" >&2
+        return 1
+    fi
+    
+    echo -e "${C_B_GREEN}✓ 检测到设备型号：${C_RESET}${C_GREEN}${DEVICE_MODEL}${C_RESET}"
+    return 0
+}
+
 # --- 退出脚本时清理临时文件 ---
 cleanup() {
   # 这个函数会在脚本退出时执行，清理本次运行产生的文件
@@ -382,6 +476,39 @@ echo
 # 选择 GitHub 访问方式
 select_github_access
 
+# 选择 Docker 版本
+select_docker_version
+
+# 检测设备型号并生成文件名
+detect_device_model
+if [ $? -ne 0 ]; then
+    echo -e "${C_B_RED}错误：${C_RESET}设备型号检测失败，无法继续。" >&2
+    exit 1
+fi
+
+# 根据检测到的型号和Docker选择生成文件名
+echo
+echo -e "${C_BLUE}信息：${C_RESET}正在生成固件文件名..."
+
+if [ "$USE_DOCKER" = true ]; then
+    IMAGE_FILENAME_GZ="docker-immortalwrt-rockchip-armv8-${DEVICE_MODEL}-squashfs-sysupgrade.img.gz"
+    CHECKSUM_FILENAME="docker-sha256sums"
+    echo -e "${C_BLUE}信息：${C_RESET}使用 Docker 版本固件"
+else
+    IMAGE_FILENAME_GZ="immortalwrt-rockchip-armv8-${DEVICE_MODEL}-squashfs-sysupgrade.img.gz"
+    CHECKSUM_FILENAME="sha256sums"
+    echo -e "${C_BLUE}信息：${C_RESET}使用标准版固件"
+fi
+
+IMAGE_FILENAME_IMG="${IMAGE_FILENAME_GZ%.gz}"
+IMAGE_PATH_GZ="$TMP_DIR/$IMAGE_FILENAME_GZ"
+IMAGE_PATH_IMG="$TMP_DIR/$IMAGE_FILENAME_IMG"
+CHECKSUM_PATH="$TMP_DIR/$CHECKSUM_FILENAME"
+
+echo -e "${C_B_GREEN}✓ 固件文件名：${C_RESET}${C_GREEN}${IMAGE_FILENAME_GZ}${C_RESET}"
+echo -e "${C_B_GREEN}✓ 校验文件名：${C_RESET}${C_GREEN}${CHECKSUM_FILENAME}${C_RESET}"
+echo
+
 # 启用严格错误检查
 set -e
 
@@ -448,6 +575,25 @@ echo -e "${C_CYAN}│${C_RESET} ${C_B_BLUE}项目${C_RESET}                     
 echo -e "${C_CYAN}╞══════════════════════════╪════════════════════════════════════════════╡${C_RESET}"
 printf "${C_CYAN}│${C_RESET} ${C_CYAN}[#]${C_RESET} %-20s ${C_CYAN}│${C_RESET} " "版本标签"
 echo -e "${C_GREEN}${RELEASE_TAG}${C_RESET}$(printf '%*s' $((42 - ${#RELEASE_TAG})) '') ${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}├──────────────────────────┼────────────────────────────────────────────┤${C_RESET}"
+# 设备型号行
+if [ -n "$DEVICE_MODEL" ]; then
+    if [ ${#DEVICE_MODEL} -gt 42 ]; then
+        model_display="${DEVICE_MODEL:0:39}..."
+    else
+        model_display="$DEVICE_MODEL"
+    fi
+    printf "${C_CYAN}│${C_RESET} ${C_GREEN}[√]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_GREEN}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "设备型号" "$model_display"
+else
+    printf "${C_CYAN}│${C_RESET} ${C_YELLOW}[-]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_YELLOW}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "设备型号" "未检测到"
+fi
+echo -e "${C_CYAN}├──────────────────────────┼────────────────────────────────────────────┤${C_RESET}"
+# Docker版本行
+if [ "$USE_DOCKER" = true ]; then
+    printf "${C_CYAN}│${C_RESET} ${C_BLUE}[🐳]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_BLUE}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "固件类型" "Docker 版本"
+else
+    printf "${C_CYAN}│${C_RESET} ${C_GREEN}[✓]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_GREEN}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "固件类型" "标准版"
+fi
 echo -e "${C_CYAN}├──────────────────────────┼────────────────────────────────────────────┤${C_RESET}"
 printf "${C_CYAN}│${C_RESET} ${C_CYAN}[↓]${C_RESET} %-20s ${C_CYAN}│${C_RESET} %-42s ${C_CYAN}│${C_RESET}\\n" "固件文件" "$(basename "$IMAGE_FILENAME_GZ")"
 echo -e "${C_CYAN}├──────────────────────────┼────────────────────────────────────────────┤${C_RESET}"
