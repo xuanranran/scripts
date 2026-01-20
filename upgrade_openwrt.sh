@@ -263,11 +263,28 @@ set -e
 
 # --- 3. 临时增大 /tmp 分区 ---
 echo -e "${C_BLUE}--- 步骤 3: 临时增大 /tmp 分区 ---${C_RESET}"
-echo -e "${C_BLUE}信息：${C_RESET}尝试临时将 /tmp 重新挂载为更大内存（RAM 的 100%）..."
-echo -e "      ${C_YELLOW}注意：${C_RESET}此更改仅在本次运行期间有效，重启后失效。"
-mount -t tmpfs -o remount,size=100% tmpfs /tmp || echo -e "${C_YELLOW}警告：${C_RESET}重新挂载 /tmp 可能失败或不受支持，继续执行..."
-echo -e "${C_BLUE}信息：${C_RESET}/tmp 当前挂载信息和大小:"
-df -h /tmp
+echo
+echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
+echo -e "${C_B_YELLOW}💾 /tmp 分区扩容选项${C_RESET}"
+echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
+echo -e "  ${C_BLUE}提示：${C_RESET}可以临时将 /tmp 分区扩大到 RAM 的 100%"
+echo -e "  ${C_GREEN}• 有助于存储下载和解压的固件文件${C_RESET}"
+echo -e "  ${C_YELLOW}• 此更改仅在本次运行期间有效，重启后失效${C_RESET}"
+echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
+echo -e "\n${C_BLUE}信息：${C_RESET}/tmp 当前大小:"
+df -h /tmp | sed 's/^/  /'
+echo
+read -p "$(echo -e "${C_YELLOW}❓ 是否临时扩大 /tmp 分区？(Y/n) [默认: ${C_B_GREEN}是${C_RESET}${C_YELLOW}]: ${C_RESET}")" confirm_resize_tmp
+confirm_resize_tmp=${confirm_resize_tmp:-Y}  # 默认为Y
+
+if [[ "$confirm_resize_tmp" =~ ^[Yy]$ ]]; then
+    echo -e "${C_BLUE}信息：${C_RESET}正在尝试将 /tmp 重新挂载为更大内存（RAM 的 100%）..."
+    mount -t tmpfs -o remount,size=100% tmpfs /tmp || echo -e "${C_YELLOW}警告：${C_RESET}重新挂载 /tmp 可能失败或不受支持，继续执行..."
+    echo -e "${C_BLUE}信息：${C_RESET}/tmp 扩容后大小:"
+    df -h /tmp | sed 's/^/  /'
+else
+    echo -e "${C_YELLOW}信息：${C_RESET}用户选择跳过 /tmp 分区扩容。"
+fi
 echo -e "${C_BLUE}--- 步骤 3 完成 ---${C_RESET}"
 echo
 
@@ -332,7 +349,15 @@ if [ $SKIP_CHECKSUM -eq 1 ]; then
     echo -e "${C_YELLOW}信息：由于之前步骤未能找到或下载校验文件，跳过文件完整性校验。${C_RESET}"
 else
     echo
-    read -p "$(echo -e "${C_YELLOW}❓ 是否需要执行 SHA256 固件完整性校验？ (Y/n): ${C_RESET}")" confirm_run_checksum
+    echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
+    echo -e "${C_B_YELLOW}🔐 文件完整性校验选项${C_RESET}"
+    echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
+    echo -e "  ${C_BLUE}提示：${C_RESET}执行 SHA256 校验可以确保固件文件完整性"
+    echo -e "  ${C_GREEN}• 推荐执行校验以确保固件未被损坏或篡改${C_RESET}"
+    echo -e "  ${C_YELLOW}• 跳过校验可能导致升级失败或系统损坏${C_RESET}"
+    echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
+    read -p "$(echo -e "\n${C_YELLOW}❓ 是否执行 SHA256 固件完整性校验？(Y/n) [默认: ${C_B_GREEN}是${C_RESET}${C_YELLOW}]: ${C_RESET}")" confirm_run_checksum
+    confirm_run_checksum=${confirm_run_checksum:-Y}  # 默认为Y
 
     if [[ "$confirm_run_checksum" =~ ^[Nn]$ ]]; then
         echo -e "${C_YELLOW}信息：用户选择跳过文件完整性校验。${C_RESET}"
@@ -395,7 +420,15 @@ fi
 
 if [ "$KEEP_DATA_ALLOWED" -eq 1 ]; then
     echo
-    read -p "$(echo -e "${C_YELLOW}❓ 您想在升级时保留配置数据吗？(Y/n): ${C_RESET}")" confirm_keep_data
+    echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
+    echo -e "${C_B_YELLOW}📋 配置数据保留选项${C_RESET}"
+    echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
+    echo -e "  ${C_BLUE}提示：${C_RESET}您可以选择在升级时保留或清除配置数据"
+    echo -e "  ${C_GREEN}• 保留配置${C_RESET} - 升级后保留当前系统设置"
+    echo -e "  ${C_YELLOW}• 清除配置${C_RESET} - 升级后恢复为出厂设置"
+    echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
+    read -p "$(echo -e "\n${C_YELLOW}❓ 是否保留配置数据？(Y/n) [默认: ${C_B_GREEN}是${C_RESET}${C_YELLOW}]: ${C_RESET}")" confirm_keep_data
+    confirm_keep_data=${confirm_keep_data:-Y}  # 默认为Y
     if [[ "$confirm_keep_data" =~ ^[Nn]$ ]]; then
         echo -e "${C_BLUE}信息：${C_RESET}用户选择【${C_YELLOW}不保留${C_RESET}】配置数据进行升级。"
         SYSUPGRADE_ARGS="-n"
@@ -409,52 +442,99 @@ echo
 
 # --- 11. 询问可选参数并最终确认 ---
 echo -e "${C_BLUE}--- 步骤 11: 配置可选参数并最终确认 ---${C_RESET}"
-UPGRADE_INFO="将使用以下固件文件进行升级：\n  >> ${C_CYAN}${IMAGE_PATH_IMG}${C_RESET}\n\n"
-if [ "$SYSUPGRADE_ARGS" == "-n" ]; then UPGRADE_INFO="${UPGRADE_INFO}升级模式:\n  >> ${C_YELLOW}不保留配置数据${C_RESET} (使用 -n 选项)\n"; else UPGRADE_INFO="${UPGRADE_INFO}升级模式:\n  >> ${C_GREEN}尝试保留配置数据${C_RESET}\n"; fi
-if [ $SKIP_CHECKSUM -eq 1 ]; then UPGRADE_INFO="${UPGRADE_INFO}\n文件校验:\n  >> ${C_YELLOW}跳过或未执行${C_RESET}\n"; else UPGRADE_INFO="${UPGRADE_INFO}\n文件校验:\n  >> ${C_GREEN}SHA256 校验通过${C_RESET} (或用户忽略失败)\n"; fi
+# 这些变量在后面构建表格时使用，此处不再需要预先构建UPGRADE_INFO字符串
 
 # --- 询问是否强制升级 (-F) ---
 FORCE_FLAG=""
-FORCE_WARN="\n\n!!!!!!!!!!!!!!!!!!!!!!!!!!!! ${C_B_RED}危 险 操 作 提 示${C_RESET} !!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
-FORCE_WARN="${FORCE_WARN} ${C_YELLOW}'-F' (force) 选项会跳过固件兼容性检查。${C_RESET}\n"
-FORCE_WARN="${FORCE_WARN} ${C_RED}错误或不兼容的固件配合 -F 选项极易导致设备变砖！${C_RESET}\n"
-FORCE_WARN="${FORCE_WARN} ${C_YELLOW}仅在您完全确定固件正确且了解风险时才应使用。${C_RESET}\n"
-FORCE_WARN="${FORCE_WARN}!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
-echo -e "$FORCE_WARN"
-read -p "$(echo -e "${C_B_YELLOW}❓ 是否要在本次升级中使用强制 '-F' 选项？ (y/N): ${C_RESET}")" confirm_force
+echo -e "\n${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
+echo -e "${C_B_RED}⚠️  强制升级选项 (-F)${C_RESET}"
+echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
+echo -e "  ${C_YELLOW}警告：${C_RESET}'-F' 选项会跳过固件兼容性检查"
+echo -e "  ${C_RED}• 使用不兼容的固件可能导致设备变砖！${C_RESET}"
+echo -e "  ${C_YELLOW}• 仅在您完全确定固件正确且了解风险时才使用${C_RESET}"
+echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
+read -p "$(echo -e "\n${C_B_YELLOW}❓ 是否使用强制升级 '-F' 选项？(y/N) [默认: ${C_B_GREEN}否${C_RESET}${C_B_YELLOW}]: ${C_RESET}")" confirm_force
+confirm_force=${confirm_force:-N}  # 默认为N
 FORCE_FLAG_INFO=""
 if [[ "$confirm_force" =~ ^[Yy]$ ]]; then
     echo -e "${C_BLUE}信息：${C_RESET}用户选择【${C_B_RED}使用${C_RESET}】强制 '-F' 选项！"
-    FORCE_FLAG="-F"; FORCE_FLAG_INFO="\n强制执行:\n  >> ${C_B_RED}是 (-F 选项)${C_RESET}\n";
+    FORCE_FLAG="-F"; FORCE_FLAG_INFO="${C_B_RED}是 (-F)${C_RESET}";
 else
     echo -e "${C_BLUE}信息：${C_RESET}本次升级将【${C_GREEN}不使用${C_RESET}】强制 '-F' 选项。"
-    FORCE_FLAG=""; FORCE_FLAG_INFO="\n强制执行:\n  >> ${C_GREEN}否${C_RESET}\n";
+    FORCE_FLAG=""; FORCE_FLAG_INFO="${C_GREEN}否${C_RESET}";
 fi
-UPGRADE_INFO="${UPGRADE_INFO}${FORCE_FLAG_INFO}"
 
 # --- 询问是否详细输出 (-v) ---
 VERBOSE_FLAG=""
-echo # 空行分隔
-read -p "$(echo -e "${C_YELLOW}❓ 是否要在本次升级中启用详细输出模式 '-v' (verbose)？ (y/N): ${C_RESET}")" confirm_verbose
+echo
+echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
+echo -e "${C_B_YELLOW}📝 详细日志选项 (-v)${C_RESET}"
+echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
+echo -e "  ${C_BLUE}提示：${C_RESET}启用详细输出可查看升级过程的详细信息"
+echo -e "  ${C_YELLOW}• 一般用户建议使用默认模式${C_RESET}"
+echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
+read -p "$(echo -e "\n${C_YELLOW}❓ 是否启用详细输出模式？(y/N) [默认: ${C_B_GREEN}否${C_RESET}${C_YELLOW}]: ${C_RESET}")" confirm_verbose
+confirm_verbose=${confirm_verbose:-N}  # 默认为N
 VERBOSE_FLAG_INFO=""
 if [[ "$confirm_verbose" =~ ^[Yy]$ ]]; then
     echo -e "${C_BLUE}信息：${C_RESET}用户选择【${C_GREEN}启用${C_RESET}】详细输出模式 (-v)。"
-    VERBOSE_FLAG="-v"; VERBOSE_FLAG_INFO="\n详细输出:\n  >> ${C_GREEN}是 (-v 选项)${C_RESET}\n";
+    VERBOSE_FLAG="-v"; VERBOSE_FLAG_INFO="${C_GREEN}是 (-v)${C_RESET}";
 else
     echo -e "${C_BLUE}信息：${C_RESET}本次升级将【${C_YELLOW}不启用${C_RESET}】详细输出模式。"
-    VERBOSE_FLAG=""; VERBOSE_FLAG_INFO="\n详细输出:\n  >> ${C_YELLOW}否${C_RESET}\n";
+    VERBOSE_FLAG=""; VERBOSE_FLAG_INFO="${C_YELLOW}否${C_RESET}";
 fi
-UPGRADE_INFO="${UPGRADE_INFO}${VERBOSE_FLAG_INFO}"
 
 # --- 最终确认与执行 ---
 echo
-echo -e "${C_BLUE}========================= 升 级 前 最 终 确 认 ========================${C_RESET}"
-echo -e "$UPGRADE_INFO" # 显示包含所有选项状态的最终信息
-if [ -z "$SYSUPGRADE_ARGS" ]; then echo -e "${C_YELLOW}建议提前备份重要数据。${C_RESET}\n"; fi
-echo -e "${C_B_YELLOW}升级过程中，请务必保持设备通电，不要中断操作！${C_RESET}"
-echo -e "${C_BLUE}=====================================================================${C_RESET}"
+echo -e "${C_CYAN}╔═════════════════════════════════════════════════════════════════════╗${C_RESET}"
+echo -e "${C_CYAN}║${C_RESET}                   ${C_B_YELLOW}📋 升级前最终确认${C_RESET}                        ${C_CYAN}║${C_RESET}"
+echo -e "${C_CYAN}╚═════════════════════════════════════════════════════════════════════╝${C_RESET}"
 echo
-read -p "$(echo -e "${C_B_YELLOW}❓ 确认要开始执行 sysupgrade 升级吗？ (y/N): ${C_RESET}")" confirm_upgrade
+
+# 构建表格内容
+DATA_MODE_INFO=""
+if [ "$SYSUPGRADE_ARGS" == "-n" ]; then
+    DATA_MODE_INFO="${C_YELLOW}不保留配置 (-n)${C_RESET}"
+else
+    DATA_MODE_INFO="${C_GREEN}保留配置${C_RESET}"
+fi
+
+CHECKSUM_INFO=""
+if [ $SKIP_CHECKSUM -eq 1 ]; then
+    CHECKSUM_INFO="${C_YELLOW}跳过/未执行${C_RESET}"
+else
+    CHECKSUM_INFO="${C_GREEN}SHA256 已验证${C_RESET}"
+fi
+
+echo -e "${C_CYAN}┌─────────────────────────┬───────────────────────────────────────────┐${C_RESET}"
+echo -e "${C_CYAN}│${C_RESET} ${C_B_BLUE}项目${C_RESET}                    ${C_CYAN}│${C_RESET} ${C_B_BLUE}详情${C_RESET}                                  ${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}├─────────────────────────┼───────────────────────────────────────────┤${C_RESET}"
+printf "${C_CYAN}│${C_RESET} %-23s ${C_CYAN}│${C_RESET} %-41s ${C_CYAN}│${C_RESET}\n" "固件文件" "$(basename "$IMAGE_PATH_IMG")"
+echo -e "${C_CYAN}├─────────────────────────┼───────────────────────────────────────────┤${C_RESET}"
+printf "${C_CYAN}│${C_RESET} %-23s ${C_CYAN}│${C_RESET} " "版本标签"
+echo -e "${C_GREEN}${RELEASE_TAG}${C_RESET}$(printf '%*s' $((41 - ${#RELEASE_TAG})) '') ${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}├─────────────────────────┼───────────────────────────────────────────┤${C_RESET}"
+printf "${C_CYAN}│${C_RESET} %-23s ${C_CYAN}│${C_RESET} " "配置数据"
+echo -e "${DATA_MODE_INFO}$(printf '%*s' $((41 - $(echo -e "${DATA_MODE_INFO}" | sed 's/\x1b\[[0-9;]*m//g' | wc -c) + 1)) '') ${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}├─────────────────────────┼───────────────────────────────────────────┤${C_RESET}"
+printf "${C_CYAN}│${C_RESET} %-23s ${C_CYAN}│${C_RESET} " "强制升级 (-F)"
+echo -e "${FORCE_FLAG_INFO}$(printf '%*s' $((41 - $(echo -e "${FORCE_FLAG_INFO}" | sed 's/\x1b\[[0-9;]*m//g' | wc -c) + 1)) '') ${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}├─────────────────────────┼───────────────────────────────────────────┤${C_RESET}"
+printf "${C_CYAN}│${C_RESET} %-23s ${C_CYAN}│${C_RESET} " "详细输出 (-v)"
+echo -e "${VERBOSE_FLAG_INFO}$(printf '%*s' $((41 - $(echo -e "${VERBOSE_FLAG_INFO}" | sed 's/\x1b\[[0-9;]*m//g' | wc -c) + 1)) '') ${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}├─────────────────────────┼───────────────────────────────────────────┤${C_RESET}"
+printf "${C_CYAN}│${C_RESET} %-23s ${C_CYAN}│${C_RESET} " "文件校验"
+echo -e "${CHECKSUM_INFO}$(printf '%*s' $((41 - $(echo -e "${CHECKSUM_INFO}" | sed 's/\x1b\[[0-9;]*m//g' | wc -c) + 1)) '') ${C_CYAN}│${C_RESET}"
+echo -e "${C_CYAN}└─────────────────────────┴───────────────────────────────────────────┘${C_RESET}"
+echo
+
+if [ -z "$SYSUPGRADE_ARGS" ]; then
+    echo -e "${C_YELLOW}💡 提示：${C_RESET}建议提前备份重要数据"
+fi
+echo -e "${C_B_RED}⚠️  警告：${C_RESET}升级过程中请务必保持设备通电，不要中断操作！"
+echo
+read -p "$(echo -e "${C_B_GREEN}❓ 确认开始执行 sysupgrade 升级？(Y/n) [默认: ${C_B_GREEN}是${C_RESET}]: ${C_RESET}")" confirm_upgrade
+confirm_upgrade=${confirm_upgrade:-Y}  # 默认为Y
 
 if [[ "$confirm_upgrade" =~ ^[Yy]$ ]]; then
     # 构造最终执行信息
