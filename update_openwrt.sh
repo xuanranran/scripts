@@ -3,7 +3,7 @@
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 X86_SCRIPT="$SCRIPT_DIR/update_openwrt_x86.sh"
 ROCKCHIP_SCRIPT="$SCRIPT_DIR/update_openwrt_rockchip.sh"
-REMOTE_BASE_URLS="https://raw.githubusercontent.com/xuanranran/scripts/main/scripts https://raw.githubusercontent.com/xuanranran/scripts/main"
+REMOTE_BASE_URLS="https://raw.githubusercontent.com/xuanranran/scripts/main https://raw.githubusercontent.com/xuanranran/scripts/main/scripts"
 
 fetch_and_exec() {
   local remote_file="$1"
@@ -13,9 +13,9 @@ fetch_and_exec() {
 
   for base_url in $REMOTE_BASE_URLS; do
     if command -v curl >/dev/null 2>&1; then
-      curl -fsSL "$base_url/$remote_file" -o "$tmp_file" && exec bash "$tmp_file" "$@"
+      curl -fsSL "$base_url/$remote_file" -o "$tmp_file" 2>/dev/null && exec bash "$tmp_file" "$@"
     elif command -v wget >/dev/null 2>&1; then
-      wget -qO "$tmp_file" "$base_url/$remote_file" && exec bash "$tmp_file" "$@"
+      wget -qO "$tmp_file" "$base_url/$remote_file" 2>/dev/null && exec bash "$tmp_file" "$@"
     else
       return 1
     fi
