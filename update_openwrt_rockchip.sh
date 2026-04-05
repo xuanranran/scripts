@@ -46,7 +46,7 @@ select_github_access() {
     echo -e "${C_CYAN}│${C_RESET} ${C_B_BLUE}选择下载方式${C_RESET}                                                      ${C_CYAN}│${C_RESET}"
     echo -e "${C_CYAN}├───────────────────────────────────────────────────────────────────────┤${C_RESET}"
     echo -e "${C_CYAN}│${C_RESET}                                                                       ${C_CYAN}│${C_RESET}"
-    echo -e "${C_CYAN}│${C_RESET}  ${C_GREEN}1)${C_RESET} ${C_B_GREEN}gh-proxy.com 镜像加速${C_RESET} ${C_YELLOW}(推荐)${C_RESET}                             ${C_CYAN}│${C_RESET}"
+    echo -e "${C_CYAN}│${C_RESET}  ${C_GREEN}1)${C_RESET} ${C_B_GREEN}ghfast.top 镜像加速${C_RESET} ${C_YELLOW}(推荐)${C_RESET}                               ${C_CYAN}│${C_RESET}"
     echo -e "${C_CYAN}│${C_RESET}     ${C_CYAN}•${C_RESET} 适合网络受限环境                                           ${C_CYAN}│${C_RESET}"
     echo -e "${C_CYAN}│${C_RESET}     ${C_CYAN}•${C_RESET} 下载速度更快                                               ${C_CYAN}│${C_RESET}"
     echo -e "${C_CYAN}│${C_RESET}                                                                       ${C_CYAN}│${C_RESET}"
@@ -62,16 +62,16 @@ select_github_access() {
     echo
     case "$github_choice" in
         1)
-            echo -e "${C_B_GREEN}✓ 已选择：${C_RESET}gh-proxy.com 镜像加速"
-            GITHUB_PROXY="https://gh-proxy.com/"
+            echo -e "${C_B_GREEN}✓ 已选择：${C_RESET}ghfast.top 镜像加速"
+            GITHUB_PROXY="https://ghfast.top/"
             ;;
         2)
             echo -e "${C_B_GREEN}✓ 已选择：${C_RESET}GitHub 官方直连"
             GITHUB_PROXY=""
             ;;
         *)
-            echo -e "${C_YELLOW}⚠ 无效选项，使用默认方式：${C_RESET}gh-proxy.com 镜像加速"
-            GITHUB_PROXY="https://gh-proxy.com/"
+            echo -e "${C_YELLOW}⚠ 无效选项，使用默认方式：${C_RESET}GitHub 官方直连"
+            GITHUB_PROXY=""
             ;;
     esac
     echo
