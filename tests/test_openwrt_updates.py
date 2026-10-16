@@ -170,6 +170,84 @@ cleanup
 [[ -e .part && -e "$TMP_DIR/firmware.img" && ! -e "$TMP_DIR/release-api.json" ]]
 ''')
 
+    def test_segmented_failure_removes_fragments_before_wget(self):
+        for platform in PLATFORMS:
+            self.run_shell(platform, r'''
+aria2c() {
+    local directory="" filename="" option
+    for option in "$@"; do
+        case "$option" in --dir=*) directory=${option#*=} ;; --out=*) filename=${option#*=} ;; esac
+    done
+    printf fragmented > "$directory/$filename"
+    printf control > "$directory/$filename.aria2"
+    return 1
+}
+wget() {
+    while (($#)); do
+        if [[ "$1" == -O ]]; then
+            [[ ! -e "$2" && ! -e "$2.aria2" ]] || return 1
+            printf complete > "$2"
+            return 0
+        fi
+        shift
+    done
+    return 1
+}
+curl() { echo 'unexpected curl fallback' >&2; return 1; }
+download_file https://example.invalid/file "$FIXTURES/firmware" 30 1
+[[ $(cat "$FIXTURES/firmware") == complete && ! -e "$FIXTURES/firmware.part.aria2" ]]
+rm "$FIXTURES/firmware"
+''')
+
+    def test_incomplete_aria2_result_is_not_promoted(self):
+        for platform in PLATFORMS:
+            self.run_shell(platform, r'''
+aria2c() {
+    local option directory="" filename=""
+    for option in "$@"; do
+        case "$option" in --dir=*) directory=${option#*=} ;; --out=*) filename=${option#*=} ;; esac
+    done
+    printf partial > "$directory/$filename"
+    printf unfinished > "$directory/$filename.aria2"
+    return 0
+}
+wget() { return 1; }
+curl() { return 1; }
+if download_file https://example.invalid/file "$FIXTURES/unfinished" 30 1; then exit 99; fi
+[[ ! -e "$FIXTURES/unfinished" && ! -e "$FIXTURES/unfinished.part" && ! -e "$FIXTURES/unfinished.part.aria2" ]]
+''')
+
+    def test_optional_aria2_failure_does_not_block_curl_fallback(self):
+        for platform in PLATFORMS:
+            self.run_shell(platform, r'''
+prepare_aria2() { return 1; }
+wget() { return 1; }
+curl() {
+    while (($#)); do
+        if [[ "$1" == -o ]]; then printf complete > "$2"; return 0; fi
+        shift
+    done
+    return 1
+}
+download_file https://example.invalid/file "$FIXTURES/curl-fallback" 30 1
+[[ $(cat "$FIXTURES/curl-fallback") == complete ]]
+rm "$FIXTURES/curl-fallback"
+''')
+
+    def test_optional_aria2_install_failure_is_only_attempted_once(self):
+        for platform in PLATFORMS:
+            self.run_shell(platform, r'''
+command() {
+    if [[ "$1" == -v && "$2" == aria2c ]]; then return 1; fi
+    builtin command "$@"
+}
+opkg() { printf '%s\n' "$*" >> "$FIXTURES/install-attempts"; return 1; }
+if prepare_aria2; then exit 99; fi
+if prepare_aria2; then exit 99; fi
+[[ $(wc -l < "$FIXTURES/install-attempts") -eq 1 ]]
+rm "$FIXTURES/install-attempts"
+''')
+
     def test_dispatcher_preserves_local_arguments_and_exit_status(self):
         dispatcher = self.work / "update_openwrt.sh"
         shutil.copyfile(ROOT / dispatcher.name, dispatcher)

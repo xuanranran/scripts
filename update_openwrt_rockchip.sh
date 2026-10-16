@@ -53,33 +53,83 @@ read_input() {
     fi
 }
 
+prepare_aria2() {
+    command -v aria2c >/dev/null 2>&1 && return 0
+    # aria2 是可选加速工具，安装失败不能阻断已有下载方式。
+    [[ ${ARIA2_CHECKED:-0} == 0 ]] || return 1
+    ARIA2_CHECKED=1
+    local manager action
+    if command -v opkg >/dev/null 2>&1; then manager=opkg; action=install
+    elif command -v apk >/dev/null 2>&1; then manager=apk; action=add
+    else
+        echo '未找到 aria2c，使用 wget/curl 下载。' >&2
+        return 1
+    fi
+    echo '正在安装 aria2，以启用 4 连接分段下载...' >&2
+    if "$manager" update && "$manager" "$action" aria2 && command -v aria2c >/dev/null 2>&1; then
+        return 0
+    fi
+    echo 'aria2 不可用，继续使用 wget/curl 下载。' >&2
+    return 1
+}
+
 download_file() {
     local url="$1" destination="$2" timeout="${3:-1800}" show_progress="${4:-0}"
-    local partial="${destination}.part" attempt
-    local -a curl_options=(-fsSL) wget_options=(-q)
-    # 固件使用原生进度表显示进度、速度和剩余时间；版本信息和校验文件保持安静。
+    local partial="${destination}.part" attempt client downloaded
+    local -a curl_options=(-fsSL) wget_options=(-q) clients=(curl wget)
+    # 仅固件启用分段下载，版本信息和校验文件保持安静。
     if [[ "$show_progress" == 1 ]]; then
         curl_options=(-fL)
         wget_options=()
+        clients=(aria2c wget curl)
     fi
     # 先写入临时文件，避免失败的下载被当成完整文件使用。
-    if command -v curl >/dev/null 2>&1; then
-        if curl "${curl_options[@]}" --connect-timeout 15 --max-time "$timeout" --retry 2 \
-            -o "$partial" "$url"; then
+    for client in "${clients[@]}"; do
+        downloaded=0
+        case "$client" in
+            aria2c)
+                prepare_aria2 || continue
+                echo '使用 aria2c 下载固件（最多 4 个连接）...' >&2
+                if aria2c --no-conf=true --split=4 --max-connection-per-server=4 \
+                    --min-split-size=4M --file-allocation=none --disk-cache=0 \
+                    --auto-file-renaming=false --allow-overwrite=true \
+                    --connect-timeout=15 --timeout=30 --max-tries=3 --retry-wait=2 \
+                    --stop="$timeout" --summary-interval=0 --console-log-level=warn \
+                    --download-result=hide --enable-color=false --stderr=true \
+                    --dir="$(dirname -- "$partial")" --out="$(basename -- "$partial")" "$url" \
+                    && [[ -s "$partial" && ! -e "$partial.aria2" ]]; then
+                    downloaded=1
+                else
+                    echo '分段下载失败，改用 wget/curl 重新下载...' >&2
+                    # 分段文件可能包含空洞，不能交给其他工具按连续文件续传。
+                    rm -f -- "$partial" "$partial.aria2" || return 1
+                fi
+                ;;
+            wget)
+                command -v wget >/dev/null 2>&1 || continue
+                for attempt in 1 2 3; do
+                    ((attempt == 1)) || printf '正在重试下载（%s/3）...\n' "$attempt" >&2
+                    if wget "${wget_options[@]}" -T 30 -O "$partial" "$url"; then
+                        downloaded=1
+                        break
+                    fi
+                done
+                ;;
+            curl)
+                command -v curl >/dev/null 2>&1 || continue
+                if curl "${curl_options[@]}" --connect-timeout 15 --max-time "$timeout" --retry 2 \
+                    -o "$partial" "$url"; then
+                    downloaded=1
+                fi
+                ;;
+        esac
+        if [[ "$downloaded" == 1 ]]; then
+            rm -f -- "$partial.aria2" || return 1
             mv -f -- "$partial" "$destination"
             return $?
         fi
-    fi
-    if command -v wget >/dev/null 2>&1; then
-        for attempt in 1 2 3; do
-            ((attempt == 1)) || printf '正在重试下载（%s/3）...\n' "$attempt" >&2
-            if wget "${wget_options[@]}" -T 30 -O "$partial" "$url"; then
-                mv -f -- "$partial" "$destination"
-                return $?
-            fi
-        done
-    fi
-    rm -f -- "$partial"
+    done
+    rm -f -- "$partial" "$partial.aria2"
     printf '下载失败：%s\n' "$url" >&2
     return 1
 }
@@ -388,7 +438,7 @@ detect_device_model() {
 cleanup() {
     local file
     for file in "${IMAGE_PATH_GZ:-}" "${CHECKSUM_PATH:-}"; do
-        if [[ -n "$file" ]]; then rm -f -- "$file" "$file.part"; fi
+        if [[ -n "$file" ]]; then rm -f -- "$file" "$file.part" "$file.part.aria2"; fi
     done
     rm -f -- "$TMP_DIR/release-api.json" "$TMP_DIR/release-api.json.part"
     # 保留已解压的镜像，延续取消后可手动升级的行为。
