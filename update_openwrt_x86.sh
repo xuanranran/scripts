@@ -45,11 +45,17 @@ read_input() {
 }
 
 download_file() {
-    local url="$1" destination="$2" timeout="${3:-1800}"
+    local url="$1" destination="$2" timeout="${3:-1800}" show_progress="${4:-0}"
     local partial="${destination}.part" attempt
+    local -a curl_options=(-fsSL) wget_options=(-q)
+    # 固件使用原生进度表显示进度、速度和剩余时间；版本信息和校验文件保持安静。
+    if [[ "$show_progress" == 1 ]]; then
+        curl_options=(-fL)
+        wget_options=()
+    fi
     # 先写入临时文件，避免失败的下载被当成完整文件使用。
     if command -v curl >/dev/null 2>&1; then
-        if curl -fsSL --connect-timeout 15 --max-time "$timeout" --retry 2 \
+        if curl "${curl_options[@]}" --connect-timeout 15 --max-time "$timeout" --retry 2 \
             -o "$partial" "$url"; then
             mv -f -- "$partial" "$destination"
             return $?
@@ -58,7 +64,7 @@ download_file() {
     if command -v wget >/dev/null 2>&1; then
         for attempt in 1 2 3; do
             ((attempt == 1)) || printf '正在重试下载（%s/3）...\n' "$attempt" >&2
-            if wget -T 30 -O "$partial" "$url"; then
+            if wget "${wget_options[@]}" -T 30 -O "$partial" "$url"; then
                 mv -f -- "$partial" "$destination"
                 return $?
             fi
@@ -449,8 +455,14 @@ select_github_access
 # 启用严格错误检查
 set -e
 
-# --- 3. 临时增大 /tmp 分区 ---
-echo -e "${C_BLUE}--- 步骤 3: 临时增大 /tmp 分区 ---${C_RESET}"
+# --- 3. 选择固件版本 ---
+echo -e "${C_BLUE}--- 步骤 3: 选择最新或历史版本 ---${C_RESET}"
+select_release || exit 1
+echo -e "${C_BLUE}--- 步骤 3 完成 ---${C_RESET}"
+echo
+
+# --- 4. 临时增大 /tmp 分区 ---
+echo -e "${C_BLUE}--- 步骤 4: 临时增大 /tmp 分区 ---${C_RESET}"
 echo
 echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
 echo -e "${C_B_YELLOW}[*] /tmp 分区扩容选项${C_RESET}"
@@ -473,12 +485,6 @@ if [[ "$confirm_resize_tmp" =~ ^[Yy]$ ]]; then
 else
     echo -e "${C_YELLOW}信息：${C_RESET}用户选择跳过 /tmp 分区扩容。"
 fi
-echo -e "${C_BLUE}--- 步骤 3 完成 ---${C_RESET}"
-echo
-
-# --- 4. 选择固件版本 ---
-echo -e "${C_BLUE}--- 步骤 4: 选择最新或历史版本 ---${C_RESET}"
-select_release || exit 1
 echo -e "${C_BLUE}--- 步骤 4 完成 ---${C_RESET}"
 echo
 
@@ -527,7 +533,7 @@ echo
 # --- 7. 下载文件 ---
 echo -e "${C_BLUE}--- 步骤 7: 下载文件 ---${C_RESET}"
 echo -e "${C_BLUE}信息：${C_RESET}正在下载压缩固件 '${C_CYAN}${IMAGE_FILENAME_GZ}${C_RESET}' 到 '${C_CYAN}${IMAGE_PATH_GZ}${C_RESET}' ..."
-download_file "${GITHUB_PROXY}${IMAGE_URL}" "$IMAGE_PATH_GZ" || exit 1
+download_file "${GITHUB_PROXY}${IMAGE_URL}" "$IMAGE_PATH_GZ" 1800 1 || exit 1
 echo -e "${C_B_GREEN}信息：${C_RESET}压缩固件下载完成。"
 
 # 下载校验文件
