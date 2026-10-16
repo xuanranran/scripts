@@ -1,5 +1,14 @@
 #!/bin/bash
 
+# Allow the documented `sh update_openwrt.sh` invocation to enter Bash.
+if [ -z "${BASH_VERSION:-}" ]; then
+    if command -v bash >/dev/null 2>&1; then
+        exec bash "$0" "$@"
+    fi
+    echo "错误：请先安装 Bash，再运行此脚本。" >&2
+    exit 1
+fi
+
 # --- 颜色定义 ---
 C_RESET='\033[0m'       # 重置所有属性
 C_RED='\033[0;31m'       # 红色
@@ -35,6 +44,181 @@ IMAGE_PATH_GZ=""  # 压缩固件的完整路径
 IMAGE_PATH_IMG=""  # 解压后固件的完整路径
 CHECKSUM_PATH=""  # 校验和文件的完整路径
 
+# 两个平台脚本保持独立，以下通用函数应同步维护。
+read_input() {
+    # EOF 不应当被当成回车，从而意外接受升级默认值。
+    if ! IFS= read -r -p "$1" "$2"; then
+        printf '\n输入已关闭，操作中止。\n' >&2
+        exit 1
+    fi
+}
+
+download_file() {
+    local url="$1" destination="$2" timeout="${3:-1800}"
+    local partial="${destination}.part" attempt
+    # 先写入临时文件，避免失败的下载被当成完整文件使用。
+    if command -v curl >/dev/null 2>&1; then
+        if curl -fsSL --connect-timeout 15 --max-time "$timeout" --retry 2 \
+            -o "$partial" "$url"; then
+            mv -f -- "$partial" "$destination"
+            return $?
+        fi
+    fi
+    if command -v wget >/dev/null 2>&1; then
+        for attempt in 1 2 3; do
+            ((attempt == 1)) || printf '正在重试下载（%s/3）...\n' "$attempt" >&2
+            if wget -T 30 -O "$partial" "$url"; then
+                mv -f -- "$partial" "$destination"
+                return $?
+            fi
+        done
+    fi
+    rm -f -- "$partial"
+    printf '下载失败：%s\n' "$url" >&2
+    return 1
+}
+
+fetch_release_json() {
+    local url="$1"
+    download_file "$url" "$TMP_DIR/release-api.json" 60 || return 1
+    # 同时拒绝 HTML、空响应和非 JSON 响应。
+    jq -e 'type == "object" or type == "array"' "$TMP_DIR/release-api.json" >/dev/null || {
+        printf 'GitHub API 返回了无效数据。\n' >&2
+        return 1
+    }
+    cat "$TMP_DIR/release-api.json"
+}
+
+select_release() {
+    local latest_info history_info choices count raw_count choice index
+    local page=1 page_size=10 last_page=0 tag available
+    if ! latest_info=$(fetch_release_json "https://api.github.com/repos/$REPO/releases/latest"); then
+        printf '无法获取最新版本信息，请检查网络后重试。\n' >&2
+        return 1
+    fi
+    if ! jq -e '(.tag_name | type == "string" and length > 0) and
+        (.assets | type == "array")' <<< "$latest_info" >/dev/null; then
+        printf '无法读取 Release：%s\n' "$(jq -r '.message // "缺少版本标签或附件列表"' <<< "$latest_info")" >&2
+        return 1
+    fi
+    printf '\n最新版本：%s\n' "$(jq -r '.tag_name' <<< "$latest_info")"
+    while true; do
+        read_input '选择版本：0/回车 = 最新版本，h = 历史版本，q = 取消：' choice
+        case "$choice" in
+            ''|0) RELEASE_INFO="$latest_info"; break ;;
+            h|H) break ;;
+            q|Q) echo '操作已取消。'; exit 0 ;;
+            *) echo '请输入 0、h 或 q。' ;;
+        esac
+    done
+    if [[ "$choice" == h || "$choice" == H ]]; then
+        while true; do
+            if ! history_info=$(fetch_release_json "https://api.github.com/repos/$REPO/releases?per_page=$page_size&page=$page"); then
+                printf '无法获取历史版本列表。\n' >&2
+                return 1
+            fi
+            if ! jq -e 'type == "array"' <<< "$history_info" >/dev/null; then
+                printf '无法读取历史版本：%s\n' "$(jq -r '.message // "无效的版本列表"' <<< "$history_info")" >&2
+                return 1
+            fi
+            raw_count=$(jq 'length' <<< "$history_info")
+            choices=$(jq '[.[] | select(.draft != true and .prerelease != true)
+                | select((.tag_name | type) == "string" and (.assets | type) == "array")]' <<< "$history_info")
+            count=$(jq 'length' <<< "$choices")
+            printf '\n历史版本（第 %s 页）：\n' "$page"
+            # 一次 jq 调用生成整页列表，避免逐个版本重复解析 JSON。
+            while IFS=$'\t' read -r index tag available; do
+                if [[ "$available" == true ]]; then
+                    printf '  %2d) %s\n' "$index" "$tag"
+                else
+                    printf '  %2d) %s（无当前型号/类型固件，不可选）\n' "$index" "$tag"
+                fi
+            done < <(jq -r --arg name "$IMAGE_FILENAME_GZ" '
+                to_entries[] | [(.key + 1), .value.tag_name,
+                    any(.value.assets[]; .name == $name)] | @tsv' <<< "$choices")
+            ((count > 0)) || echo '  本页没有可显示的正式版本。'
+            ((raw_count < page_size)) && last_page=1 || last_page=0
+            while true; do
+                read_input '输入编号；n = 下一页，p = 上一页，0/回车 = 最新版本，q = 取消：' choice
+                case "$choice" in
+                    ''|0) RELEASE_INFO="$latest_info"; break 2 ;;
+                    n|N)
+                        if ((last_page)); then echo '已经是最后一页。'; else page=$((page+1)); break; fi ;;
+                    p|P)
+                        if ((page == 1)); then echo '已经是第一页。'; else page=$((page-1)); break; fi ;;
+                    q|Q) echo '操作已取消。'; exit 0 ;;
+                    *)
+                        if [[ "$choice" =~ ^[1-9][0-9]?$ ]] && ((10#$choice <= count)); then
+                            index=$((10#$choice-1))
+                            if jq -e --argjson index "$index" --arg name "$IMAGE_FILENAME_GZ" \
+                                'any(.[$index].assets[]; .name == $name)' <<< "$choices" >/dev/null; then
+                                RELEASE_INFO=$(jq -c --argjson index "$index" '.[$index]' <<< "$choices")
+                                break 2
+                            fi
+                            echo '该版本没有当前型号/类型的固件，请选择其他版本。'
+                        else
+                            echo '无效的版本编号，请重新选择。'
+                        fi ;;
+                esac
+            done
+        done
+    fi
+    RELEASE_TAG=$(jq -r '.tag_name' <<< "$RELEASE_INFO")
+    printf '已选择版本：%s\n' "$RELEASE_TAG"
+}
+
+get_expected_checksum() {
+    # 精确匹配文件名，兼容 sha256sum 的文本/二进制标记和 ./ 前缀。
+    awk -v name="$IMAGE_FILENAME_GZ" '
+        { filename=$2; sub(/\r$/, "", filename); sub(/^\*/, "", filename); sub(/^\.\//, "", filename) }
+        filename == name { hash=$1; matches++ }
+        END {
+            if (matches == 1 && length(hash) == 64 && hash !~ /[^0-9a-fA-F]/) print tolower(hash)
+            else exit 1
+        }' "$CHECKSUM_PATH"
+}
+
+check_dependencies() {
+    local cmd package manager
+    local -a missing=() required=(jq gunzip awk sha256sum lsblk)
+    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+        required+=(wget)
+    fi
+    for cmd in "${required[@]}"; do
+        command -v "$cmd" >/dev/null 2>&1 && continue
+        case "$cmd" in
+            gunzip) package=gzip ;;
+            sha256sum) package=coreutils-sha256sum ;;
+            wget) package=wget-ssl ;;
+            *) package="$cmd" ;;
+        esac
+        missing+=("$package")
+    done
+    PKG_MANAGER='无需安装依赖'
+    if ((${#missing[@]})); then
+        if command -v opkg >/dev/null 2>&1; then manager=opkg
+        elif command -v apk >/dev/null 2>&1; then manager=apk
+        else echo "错误：缺少依赖 ${missing[*]}，且未找到 opkg/apk。" >&2; return 1
+        fi
+        PKG_MANAGER="$manager"
+        "$manager" update || echo '警告：软件包列表更新失败，仍尝试安装。' >&2
+        if [[ "$manager" == opkg ]]; then
+            "$manager" install "${missing[@]}" || return 1
+        else
+            "$manager" add "${missing[@]}" || return 1
+        fi
+    fi
+    for cmd in "${required[@]}"; do
+        command -v "$cmd" >/dev/null 2>&1 || {
+            printf '错误：仍缺少命令 %s。\n' "$cmd" >&2
+            return 1
+        }
+    done
+    UBUS_PRESENT=0
+    if command -v ubus >/dev/null 2>&1; then UBUS_PRESENT=1; fi
+    required_cmds_list="${required[*]}"
+}
+
 # --- 选择 GitHub 访问方式 ---
 select_github_access() {
     echo
@@ -56,7 +240,7 @@ select_github_access() {
     echo -e "${C_CYAN}│${C_RESET}                                                                       ${C_CYAN}│${C_RESET}"
     echo -e "${C_CYAN}└───────────────────────────────────────────────────────────────────────┘${C_RESET}"
     echo
-    read -p "$(echo -e "${C_YELLOW}❓ 请选择访问方式 [1-2] (默认: ${C_B_GREEN}1${C_RESET}${C_YELLOW}): ${C_RESET}")" github_choice
+    read_input "$(echo -e "${C_YELLOW}❓ 请选择访问方式 [1-2] (默认: ${C_B_GREEN}1${C_RESET}${C_YELLOW}): ${C_RESET}")" github_choice
     github_choice=${github_choice:-1}
     
     echo
@@ -98,7 +282,7 @@ select_docker_version() {
     echo -e "${C_CYAN}│${C_RESET}                                                                       ${C_CYAN}│${C_RESET}"
     echo -e "${C_CYAN}└───────────────────────────────────────────────────────────────────────┘${C_RESET}"
     echo
-    read -p "$(echo -e "${C_YELLOW}❓ 请选择固件类型 [1-2] (默认: ${C_B_GREEN}1${C_RESET}${C_YELLOW}): ${C_RESET}")" docker_choice
+    read_input "$(echo -e "${C_YELLOW}❓ 请选择固件类型 [1-2] (默认: ${C_B_GREEN}1${C_RESET}${C_YELLOW}): ${C_RESET}")" docker_choice
     docker_choice=${docker_choice:-1}
     
     echo
@@ -147,7 +331,8 @@ detect_device_model() {
     
     # 尝试从ubus获取board_name
     if command -v ubus >/dev/null 2>&1; then
-        local ubus_board=$(ubus call system board 2>/dev/null | jq -r '.board_name // empty')
+        local ubus_board
+        ubus_board=$(ubus call system board 2>/dev/null | jq -r '.board_name // empty') || ubus_board=""
         if [ -n "$ubus_board" ]; then
             board_name="$ubus_board"
             # 如果之前没找到信息，或者ubus更准确，更新source
@@ -193,33 +378,34 @@ detect_device_model() {
     return 0
 }
 
-# --- 退出脚本时清理临时文件 ---
+# --- 退出脚本时清理本次任务的临时文件 ---
 cleanup() {
-  # 这个函数会在脚本退出时执行，清理本次运行产生的文件
-  echo # 清理前空一行
-  echo -e "${C_BLUE}信息：${C_RESET}正在清理本次运行时产生的临时文件..."
-  rm -f "$IMAGE_PATH_GZ" "$IMAGE_PATH_IMG" "$CHECKSUM_PATH"
+    local file
+    for file in "${IMAGE_PATH_GZ:-}" "${CHECKSUM_PATH:-}"; do
+        if [[ -n "$file" ]]; then rm -f -- "$file" "$file.part"; fi
+    done
+    rm -f -- "$TMP_DIR/release-api.json" "$TMP_DIR/release-api.json.part"
+    # 保留已解压的镜像，延续取消后可手动升级的行为。
+    rmdir -- "$TMP_DIR" 2>/dev/null || true
 }
-# 设置陷阱：当脚本退出时（EXIT信号），执行 cleanup 函数
-# trap cleanup EXIT # 升级成功不会执行
 
-# --- 设置：如果任何命令失败则立即退出 ---
-# 在依赖项安装/检查步骤中会临时禁用此设置
-# set -e
+if [[ $(id -u) != 0 ]]; then
+    echo '错误：请以 root 用户运行升级脚本。' >&2
+    exit 1
+fi
 
-# *** 初始清理 /tmp ***
-echo
-echo -e "${C_BLUE}信息：${C_RESET}正在清理 /tmp 目录中可能存在的旧固件及校验文件..."
-rm -f "$IMAGE_PATH_GZ" "$IMAGE_PATH_IMG" "$CHECKSUM_PATH"
-echo -e "${C_YELLOW}警告：${C_RESET}  正在清理 /tmp 目录下所有的 ${C_RED}*.img${C_RESET} 和 ${C_RED}*.gz${C_RESET} 文件！"
-/bin/rm -f ${TMP_DIR}/*.img ${TMP_DIR}/*.gz
-echo -e "${C_BLUE}信息：${C_RESET}  .img / .gz 文件清理完成。"
-echo -e "${C_BLUE}信息：${C_RESET}  正在清理 /tmp 目录下名称含 'upgrade' 或 'update' 的 .sh 脚本..."
-/bin/rm -f ${TMP_DIR}/*upgrade*.sh ${TMP_DIR}/*update*.sh
-echo -e "${C_BLUE}信息：${C_RESET}  相关 .sh 脚本清理完成。"
-echo -e "${C_B_YELLOW}注意：${C_RESET}脚本【不会】清理 ${C_RED}/root${C_RESET} 目录下的任何文件。如有需要请手动清理。"
-echo -e "${C_B_GREEN}初始清理完成。${C_RESET}"
-# *** 清理结束 ***
+# 每次运行使用独立目录，不删除 /tmp 中其他任务的镜像或脚本。
+TMP_DIR=$(mktemp -d /tmp/openwrt-upgrade.XXXXXX) || exit 1
+if [[ -n ${IMAGE_FILENAME_GZ:-} ]]; then
+    IMAGE_PATH_GZ="$TMP_DIR/$IMAGE_FILENAME_GZ"
+    IMAGE_PATH_IMG="$TMP_DIR/$IMAGE_FILENAME_IMG"
+    CHECKSUM_PATH="$TMP_DIR/$CHECKSUM_FILENAME"
+fi
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+echo "信息：本次任务的临时目录为 $TMP_DIR"
 
 echo
 echo -e "${C_BLUE}=====================================================================${C_RESET}"
@@ -227,123 +413,11 @@ echo -e "${C_BLUE} OpenWRT/ImmortalWrt 自动升级脚本 ${C_RESET}"
 echo -e "${C_BLUE}=====================================================================${C_RESET}"
 echo
 
-# --- 1. 检查并尝试安装依赖项 (使用字符串代替数组) ---
+# --- 1. 检查并尝试安装依赖项 ---
 echo -e "${C_BLUE}--- 步骤 1: 检查并尝试安装依赖项 ---${C_RESET}"
-echo -e "${C_BLUE}信息：${C_RESET}检查所需工具 (wget, jq, gunzip, awk, sha256sum, lsblk)..."
+echo -e "${C_BLUE}信息：${C_RESET}检查所需工具 (curl/wget, jq, gunzip, awk, sha256sum, lsblk)..."
 
-PKG_MANAGER=""
-UPDATE_CMD=""
-INSTALL_CMD=""
-UBUS_PRESENT=0
-
-# 检测包管理器 (不变)
-if command -v opkg >/dev/null 2>&1; then
-    PKG_MANAGER="opkg"; UPDATE_CMD="opkg update"; INSTALL_CMD="opkg install";
-elif command -v apk >/dev/null 2>&1; then
-    PKG_MANAGER="apk"; UPDATE_CMD="apk update"; INSTALL_CMD="apk add";
-else
-    echo -e "${C_B_RED}错误：${C_RESET}无法检测到 'opkg' 或 'apk' 包管理器。" >&2; exit 1;
-fi
-echo -e "${C_BLUE}信息：${C_RESET}检测到包管理器: ${C_CYAN}${PKG_MANAGER}${C_RESET}"
-
-if command -v ubus >/dev/null 2>&1; then UBUS_PRESENT=1; fi
-
-update_run=0
-# *** 修改点：使用字符串代替数组 ***
-missing_pkgs_str=""                 # 空格分隔的待安装包名
-missing_cmds_found_initially_str="" # 空格分隔的初始缺失命令名
-required_cmds_list="wget jq gunzip awk sha256sum lsblk" # 需要检查的命令列表字符串
-
-echo "信息：正在检查所需的 命令 ($required_cmds_list) 并识别需要安装的 软件包..."
-for cmd_to_check in $required_cmds_list; do # 直接迭代字符串列表
-    echo -e "${C_BLUE}信息：${C_RESET}  检查 命令 '${C_CYAN}${cmd_to_check}${C_RESET}'..."
-    if ! command -v "$cmd_to_check" >/dev/null 2>&1; then
-        pkg_name=""
-        if [ "$cmd_to_check" == "gunzip" ]; then pkg_name="gzip";
-        elif [ "$cmd_to_check" == "sha256sum" ]; then pkg_name="coreutils";
-        elif [ "$cmd_to_check" == "lsblk" ]; then pkg_name="lsblk";
-        elif [ "$cmd_to_check" == "wget" ] || [ "$cmd_to_check" == "jq" ]; then pkg_name="$cmd_to_check"; fi
-
-        echo -e "  ${C_YELLOW}>> 命令 '$cmd_to_check' 未找到。${C_RESET}"
-        # 追加缺失命令到字符串
-        [ -n "$missing_cmds_found_initially_str" ] && missing_cmds_found_initially_str="$missing_cmds_found_initially_str "
-        missing_cmds_found_initially_str="$missing_cmds_found_initially_str$cmd_to_check"
-
-        if [ -n "$pkg_name" ]; then
-            echo -e "     这个命令通常由 软件包 '${C_YELLOW}${pkg_name}${C_RESET}' 提供。"
-            # 检查包名是否已在待安装列表字符串中 (使用 grep)
-            if ! echo " $missing_pkgs_str " | grep -q " $pkg_name "; then
-                 # 追加缺失包名到字符串
-                 [ -n "$missing_pkgs_str" ] && missing_pkgs_str="$missing_pkgs_str "
-                 missing_pkgs_str="$missing_pkgs_str$pkg_name"
-            fi
-        else
-             echo -e "     这个命令 ('$cmd_to_check') 通常由系统基础包 (如 busybox) 提供。"
-        fi
-    else
-        echo -e "  ${C_GREEN}>> 命令 '$cmd_to_check' 已找到。${C_RESET}"
-    fi
-done
-
-# --- 尝试安装缺失的软件包 ---
-if [ -n "$missing_pkgs_str" ]; then # 检查字符串是否非空
-    echo -e "${C_YELLOW}警告：${C_RESET}检测到缺失必需的软件包: ${C_CYAN}${missing_pkgs_str}${C_RESET}"
-    echo -e "${C_BLUE}信息：${C_RESET}正在尝试使用 '$PKG_MANAGER' 进行安装 (需要 root 权限和网络)..."
-    if [ "$update_run" -eq 0 ]; then
-        echo -e "${C_BLUE}信息：${C_RESET}  正在运行软件包列表更新 (${C_CYAN}${UPDATE_CMD}${C_RESET})..."
-        set +e; $UPDATE_CMD; update_status=$?; set -e
-        if [ $update_status -ne 0 ]; then echo -e "${C_YELLOW}警告：${C_RESET}  软件包列表更新失败 (退出码 $update_status)，但仍尝试安装..."; fi
-        update_run=1
-    fi
-    echo -e "${C_BLUE}信息：${C_RESET}  正在运行安装命令 (${C_CYAN}${INSTALL_CMD} ${missing_pkgs_str}${C_RESET})..."
-    set +e; $INSTALL_CMD $missing_pkgs_str; install_status=$?; set -e # 使用包名字符串
-    if [ $install_status -ne 0 ]; then echo -e "${C_YELLOW}警告：${C_RESET}  软件包安装命令退出码为 $install_status。"; fi
-
-    # 重新检查依赖项
-    echo "信息：正在重新检查依赖项..."
-    final_recheck_missing_cmds_str=""
-    # 迭代初始缺失的命令字符串
-    for cmd_to_recheck in $missing_cmds_found_initially_str; do
-        if ! command -v "$cmd_to_recheck" >/dev/null 2>&1; then
-             # 检查这个命令对应的包是否在我们尝试安装的列表里
-             pkg_to_find=""
-             if [ "$cmd_to_recheck" == "gunzip" ]; then pkg_to_find="gzip";
-             elif [ "$cmd_to_recheck" == "sha256sum" ]; then pkg_to_find="coreutils";
-             elif [ "$cmd_to_recheck" == "lsblk" ]; then pkg_to_find="lsblk";
-             elif [ "$cmd_to_recheck" == "wget" ]; then pkg_to_find="wget";
-             elif [ "$cmd_to_recheck" == "jq" ]; then pkg_to_find="jq"; fi
-
-             if [ -n "$pkg_to_find" ] && echo " $missing_pkgs_str " | grep -q " $pkg_to_find "; then
-                  # 如果是我们尝试安装的包对应的命令，并且现在还找不到，则记录最终缺失
-                  [ -n "$final_recheck_missing_cmds_str" ] && final_recheck_missing_cmds_str="$final_recheck_missing_cmds_str "
-                  final_recheck_missing_cmds_str="$final_recheck_missing_cmds_str$cmd_to_recheck"
-             fi
-        fi
-    done
-    if [ -n "$final_recheck_missing_cmds_str" ]; then
-         echo -e "${C_B_RED}错误：${C_RESET}必需的依赖项安装失败或仍然缺失。" >&2
-         echo -e "       仍然缺失以下命令: ${C_RED}${final_recheck_missing_cmds_str}${C_RESET}" >&2
-         exit 1
-     else
-         echo -e "${C_B_GREEN}信息：${C_RESET}所有尝试安装的必需软件包似乎都已成功安装。"
-     fi
-fi
-
-# 最终确认所有命令都存在
-echo "信息：依赖项最终检查..."
-final_check_missing_cmds_str=""
-# *** 修改点：直接迭代命令字符串列表进行最终检查 ***
-for cmd_to_verify in $required_cmds_list; do
-    if ! command -v "$cmd_to_verify" >/dev/null 2>&1; then
-        [ -n "$final_check_missing_cmds_str" ] && final_check_missing_cmds_str="$final_check_missing_cmds_str "
-        final_check_missing_cmds_str="$final_check_missing_cmds_str$cmd_to_verify"
-    fi
-done
-
-if [ -n "$final_check_missing_cmds_str" ]; then # 检查字符串是否非空
-    echo -e "${C_B_RED}错误：${C_RESET}脚本运行缺少必要的命令: ${C_RED}${final_check_missing_cmds_str}${C_RESET}" >&2
-    exit 1
-fi
+check_dependencies || exit 1
 
 # 显示依赖项检查总结表格
 echo
@@ -502,8 +576,7 @@ select_github_access
 select_docker_version
 
 # 检测设备型号并生成文件名
-detect_device_model
-if [ $? -ne 0 ]; then
+if ! detect_device_model; then
     echo -e "${C_B_RED}错误：${C_RESET}设备型号检测失败，无法继续。" >&2
     exit 1
 fi
@@ -561,7 +634,7 @@ echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━�
 echo -e "\n${C_BLUE}信息：${C_RESET}/tmp 当前大小:"
 df -h /tmp | sed 's/^/  /'
 echo
-read -p "$(echo -e "${C_YELLOW}❓ 是否临时扩大 /tmp 分区？(Y/n) [默认: ${C_B_GREEN}是${C_RESET}${C_YELLOW}]: ${C_RESET}")" confirm_resize_tmp
+read_input "$(echo -e "${C_YELLOW}❓ 是否临时扩大 /tmp 分区？(Y/n) [默认: ${C_B_GREEN}是${C_RESET}${C_YELLOW}]: ${C_RESET}")" confirm_resize_tmp
 confirm_resize_tmp=${confirm_resize_tmp:-Y}  # 默认为Y
 
 if [[ "$confirm_resize_tmp" =~ ^[Yy]$ ]]; then
@@ -575,14 +648,9 @@ fi
 echo -e "${C_BLUE}--- 步骤 3 完成 ---${C_RESET}"
 echo
 
-# --- 4. 获取最新 Release 信息 ---
-echo -e "${C_BLUE}--- 步骤 4: 获取最新 Release 信息 ---${C_RESET}"
-echo -e "${C_BLUE}信息：${C_RESET}正在从 GitHub 仓库 '${C_CYAN}${REPO}${C_RESET}' 获取最新版本信息..."
-API_URL="https://api.github.com/repos/$REPO/releases/latest"
-RELEASE_INFO=$(wget -qO- --no-check-certificate "$API_URL")
-if [ -z "$RELEASE_INFO" ]; then echo -e "${C_B_RED}错误：${C_RESET}无法从 GitHub API 获取版本信息。" >&2; exit 1; fi
-RELEASE_TAG=$(echo "$RELEASE_INFO" | jq -r '.tag_name // "未知标签"')
-echo -e "${C_BLUE}信息：${C_RESET}找到最新版本标签: ${C_GREEN}${RELEASE_TAG}${C_RESET}"
+# --- 4. 选择固件版本 ---
+echo -e "${C_BLUE}--- 步骤 4: 选择最新或历史版本 ---${C_RESET}"
+select_release || exit 1
 echo -e "${C_BLUE}--- 步骤 4 完成 ---${C_RESET}"
 echo
 
@@ -642,7 +710,7 @@ echo -e "${C_CYAN}├───────────────────�
 printf "${C_CYAN}│${C_RESET} ${C_CYAN}[>]${C_RESET} %-20s ${C_CYAN}│${C_RESET} %-42s ${C_CYAN}│${C_RESET}\\n" "保存路径" "$TMP_DIR"
 echo -e "${C_CYAN}└──────────────────────────┴────────────────────────────────────────────┘${C_RESET}"
 echo
-read -p "$(echo -e "\n${C_YELLOW}❓ 是否开始下载此固件文件？(Y/n) [默认: ${C_B_GREEN}是${C_RESET}${C_YELLOW}]: ${C_RESET}")" confirm_download
+read_input "$(echo -e "\n${C_YELLOW}❓ 是否开始下载此固件文件？(Y/n) [默认: ${C_B_GREEN}是${C_RESET}${C_YELLOW}]: ${C_RESET}")" confirm_download
 confirm_download=${confirm_download:-Y}  # 默认为Y
 if [[ ! "$confirm_download" =~ ^[Yy]$ ]]; then echo -e "${C_YELLOW}操作已取消，未下载固件。${C_RESET}"; exit 0; fi
 echo
@@ -650,13 +718,14 @@ echo
 # --- 7. 下载文件 ---
 echo -e "${C_BLUE}--- 步骤 7: 下载文件 ---${C_RESET}"
 echo -e "${C_BLUE}信息：${C_RESET}正在下载压缩固件 '${C_CYAN}${IMAGE_FILENAME_GZ}${C_RESET}' 到 '${C_CYAN}${IMAGE_PATH_GZ}${C_RESET}' ..."
-wget --progress=bar:force --no-check-certificate -O "$IMAGE_PATH_GZ" "${GITHUB_PROXY}${IMAGE_URL}"
+download_file "${GITHUB_PROXY}${IMAGE_URL}" "$IMAGE_PATH_GZ" || exit 1
 echo -e "${C_B_GREEN}信息：${C_RESET}压缩固件下载完成。"
 
 # 下载校验文件
 if [ $SKIP_CHECKSUM -eq 0 ]; then
     echo -e "${C_BLUE}信息：${C_RESET}正在下载校验文件 '${C_CYAN}${CHECKSUM_FILENAME}${C_RESET}' 到 '${C_CYAN}${CHECKSUM_PATH}${C_RESET}' ..."
-    set +e; wget -q --no-check-certificate -O "$CHECKSUM_PATH" "${GITHUB_PROXY}${CHECKSUM_URL}"; dl_status=$?; set -e
+    dl_status=0
+    download_file "${GITHUB_PROXY}${CHECKSUM_URL}" "$CHECKSUM_PATH" 120 || dl_status=$?
     if [ $dl_status -ne 0 ]; then
         echo -e "${C_YELLOW}警告：${C_RESET}下载校验文件 '${C_YELLOW}${CHECKSUM_FILENAME}${C_RESET}' 失败，将跳过文件完整性校验。"
         rm -f "$CHECKSUM_PATH"; SKIP_CHECKSUM=1;
@@ -678,7 +747,7 @@ else
     echo -e "  ${C_GREEN}• 推荐执行校验以确保固件未被损坏或篡改${C_RESET}"
     echo -e "  ${C_YELLOW}• 跳过校验可能导致升级失败或系统损坏${C_RESET}"
     echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
-    read -p "$(echo -e "\n${C_YELLOW}❓ 是否执行 SHA256 固件完整性校验？(Y/n) [默认: ${C_B_GREEN}是${C_RESET}${C_YELLOW}]: ${C_RESET}")" confirm_run_checksum
+    read_input "$(echo -e "\n${C_YELLOW}❓ 是否执行 SHA256 固件完整性校验？(Y/n) [默认: ${C_B_GREEN}是${C_RESET}${C_YELLOW}]: ${C_RESET}")" confirm_run_checksum
     confirm_run_checksum=${confirm_run_checksum:-Y}  # 默认为Y
 
     if [[ "$confirm_run_checksum" =~ ^[Nn]$ ]]; then
@@ -686,7 +755,7 @@ else
         SKIP_CHECKSUM=1
     else
         echo -e "${C_BLUE}信息：${C_RESET}正在校验文件 '${C_CYAN}${IMAGE_FILENAME_GZ}${C_RESET}' 的 SHA256 哈希值..."
-        EXPECTED_SUM=$(grep "$IMAGE_FILENAME_GZ" "$CHECKSUM_PATH" | awk '{print $1}')
+        EXPECTED_SUM=$(get_expected_checksum) || EXPECTED_SUM=""
         if [ -z "$EXPECTED_SUM" ]; then
              echo -e "${C_YELLOW}警告：${C_RESET}在校验文件 '${C_YELLOW}${CHECKSUM_FILENAME}${C_RESET}' 中未能找到固件 '${C_YELLOW}${IMAGE_FILENAME_GZ}${C_RESET}' 的校验信息。跳过校验。"
              SKIP_CHECKSUM=1
@@ -705,7 +774,8 @@ else
                 echo -e "${C_B_GREEN}✅ 校验成功！文件完整。${C_RESET}"
             else
                 echo; echo -e "${C_B_RED}❌ 错误：SHA256 校验和不匹配！文件可能已损坏或不完整。${C_RESET}"; echo
-                read -p "$(echo -e "${C_B_YELLOW}❓ 警告：文件校验失败！是否仍要继续升级？(y/N): ${C_RESET}")" confirm_checksum_fail
+                confirm_checksum_fail=""
+                read_input "$(echo -e "${C_B_YELLOW}❓ 警告：文件校验失败！是否仍要继续升级？(y/N): ${C_RESET}")" confirm_checksum_fail
                 if [[ ! "$confirm_checksum_fail" =~ ^[Yy]$ ]]; then echo -e "${C_YELLOW}操作中止。${C_RESET}"; exit 1; fi
                 echo -e "${C_YELLOW}信息：用户选择忽略校验失败并继续。${C_RESET}"
                 SKIP_CHECKSUM=1
@@ -782,7 +852,7 @@ if [ "$KEEP_DATA_ALLOWED" -eq 1 ]; then
     echo -e "  ${C_GREEN}• 保留配置${C_RESET} - 升级后保留当前系统设置"
     echo -e "  ${C_YELLOW}• 清除配置${C_RESET} - 升级后恢复为出厂设置"
     echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
-    read -p "$(echo -e "\n${C_YELLOW}❓ 是否保留配置数据？(Y/n) [默认: ${C_B_GREEN}是${C_RESET}${C_YELLOW}]: ${C_RESET}")" confirm_keep_data
+    read_input "$(echo -e "\n${C_YELLOW}❓ 是否保留配置数据？(Y/n) [默认: ${C_B_GREEN}是${C_RESET}${C_YELLOW}]: ${C_RESET}")" confirm_keep_data
     confirm_keep_data=${confirm_keep_data:-Y}  # 默认为Y
     if [[ "$confirm_keep_data" =~ ^[Nn]$ ]]; then
         echo -e "${C_BLUE}信息：${C_RESET}用户选择【${C_YELLOW}不保留${C_RESET}】配置数据进行升级。"
@@ -808,7 +878,7 @@ echo -e "  ${C_YELLOW}警告：${C_RESET}'-F' 选项会跳过固件兼容性检�
 echo -e "  ${C_RED}• 使用不兼容的固件可能导致设备变砖！${C_RESET}"
 echo -e "  ${C_YELLOW}• 仅在您完全确定固件正确且了解风险时才使用${C_RESET}"
 echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
-read -p "$(echo -e "\n${C_B_YELLOW}❓ 是否使用强制升级 '-F' 选项？(Y/n) [默认: ${C_B_GREEN}是${C_RESET}${C_B_YELLOW}]: ${C_RESET}")" confirm_force
+read_input "$(echo -e "\n${C_B_YELLOW}❓ 是否使用强制升级 '-F' 选项？(Y/n) [默认: ${C_B_GREEN}是${C_RESET}${C_B_YELLOW}]: ${C_RESET}")" confirm_force
 confirm_force=${confirm_force:-Y}  # 默认为Y
 FORCE_FLAG_INFO=""
 if [[ "$confirm_force" =~ ^[Nn]$ ]]; then
@@ -828,7 +898,7 @@ echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━�
 echo -e "  ${C_BLUE}提示：${C_RESET}启用详细输出可查看升级过程的详细信息"
 echo -e "  ${C_YELLOW}• 一般用户建议使用默认模式${C_RESET}"
 echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
-read -p "$(echo -e "\n${C_YELLOW}❓ 是否启用详细输出模式？(y/N) [默认: ${C_B_GREEN}否${C_RESET}${C_YELLOW}]: ${C_RESET}")" confirm_verbose
+read_input "$(echo -e "\n${C_YELLOW}❓ 是否启用详细输出模式？(y/N) [默认: ${C_B_GREEN}否${C_RESET}${C_YELLOW}]: ${C_RESET}")" confirm_verbose
 confirm_verbose=${confirm_verbose:-N}  # 默认为N
 VERBOSE_FLAG_INFO=""
 if [[ "$confirm_verbose" =~ ^[Yy]$ ]]; then
@@ -908,7 +978,7 @@ if [ -z "$SYSUPGRADE_ARGS" ]; then
 fi
 echo -e "${C_B_RED}[!] 警告：${C_RESET}升级过程中请务必保持设备通电，不要中断操作！"
 echo
-read -p "$(echo -e "${C_B_GREEN}❓ 确认开始执行 sysupgrade 升级？(Y/n) [默认: ${C_B_GREEN}是${C_RESET}]: ${C_RESET}")" confirm_upgrade
+read_input "$(echo -e "${C_B_GREEN}❓ 确认开始执行 sysupgrade 升级？(Y/n) [默认: ${C_B_GREEN}是${C_RESET}]: ${C_RESET}")" confirm_upgrade
 confirm_upgrade=${confirm_upgrade:-Y}  # 默认为Y
 
 if [[ "$confirm_upgrade" =~ ^[Yy]$ ]]; then
@@ -928,12 +998,12 @@ if [[ "$confirm_upgrade" =~ ^[Yy]$ ]]; then
         # 如果启用了强制升级，使用 exec 直接替换进程，防止 SSH 断开后的误报错误
         echo -e "${C_B_GREEN}✅ 信息：sysupgrade 命令已启动。SSH 连接即将断开，设备将重启。${C_RESET}"
         echo
-        exec sysupgrade $FORCE_FLAG $VERBOSE_FLAG $SYSUPGRADE_ARGS "$IMAGE_PATH_IMG"
+        exec sysupgrade ${FORCE_FLAG:+"$FORCE_FLAG"} ${VERBOSE_FLAG:+"$VERBOSE_FLAG"} ${SYSUPGRADE_ARGS:+"$SYSUPGRADE_ARGS"} "$IMAGE_PATH_IMG"
     else
         # 未启用强制升级，使用常规调用以捕获潜在的校验错误
         # 临时禁用 strict error checking
         set +e
-        sysupgrade $FORCE_FLAG $VERBOSE_FLAG $SYSUPGRADE_ARGS "$IMAGE_PATH_IMG"
+        sysupgrade ${FORCE_FLAG:+"$FORCE_FLAG"} ${VERBOSE_FLAG:+"$VERBOSE_FLAG"} ${SYSUPGRADE_ARGS:+"$SYSUPGRADE_ARGS"} "$IMAGE_PATH_IMG"
         sysupgrade_status=$?
         set -e
 
@@ -950,7 +1020,7 @@ if [[ "$confirm_upgrade" =~ ^[Yy]$ ]]; then
                 echo -e "${C_YELLOW}分析：升级失败通常是因为固件版本检查不通过 (如 'Image metadata not present' 或 'Image check failed')。${C_RESET}"
                 echo -e "${C_YELLOW}      这在跨版本升级或刷写不同固件时很常见。${C_RESET}"
                 
-                read -p "$(echo -e "\n${C_B_YELLOW}❓ 是否尝试使用强制升级 '-F' 选项重试？(y/N) [默认: ${C_B_GREEN}是${C_RESET}${C_B_YELLOW}]: ${C_RESET}")" retry_force
+                read_input "$(echo -e "\n${C_B_YELLOW}❓ 是否尝试使用强制升级 '-F' 选项重试？(y/N) [默认: ${C_B_GREEN}是${C_RESET}${C_B_YELLOW}]: ${C_RESET}")" retry_force
                 retry_force=${retry_force:-Y}
                 
                 if [[ "$retry_force" =~ ^[Yy]$ ]]; then
@@ -961,7 +1031,7 @@ if [[ "$confirm_upgrade" =~ ^[Yy]$ ]]; then
                     echo
                     
                     # 使用 exec 替换当前 shell 进程
-                    exec sysupgrade $FORCE_FLAG $VERBOSE_FLAG $SYSUPGRADE_ARGS "$IMAGE_PATH_IMG"
+                    exec sysupgrade ${FORCE_FLAG:+"$FORCE_FLAG"} ${VERBOSE_FLAG:+"$VERBOSE_FLAG"} ${SYSUPGRADE_ARGS:+"$SYSUPGRADE_ARGS"} "$IMAGE_PATH_IMG"
                 else
                     echo -e "${C_YELLOW}信息：用户选择不重试。脚本退出。${C_RESET}"
                     exit 1
