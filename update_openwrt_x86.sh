@@ -41,7 +41,202 @@ BOOT_MEDIUM="未识别"
 GITHUB_PROXY=""  # GitHub 代理前缀
 
 # 两个平台脚本保持独立，以下通用函数应同步维护。
+# 独立标题框与留白选项框；信息汇总使用表格，统一按终端显示宽度折行。
+UI_OPEN=0
+UI_TITLE=""
+UI_ROWS=()
+
+ui_section() {
+    ui_end
+    UI_TITLE="$1"
+    UI_TITLE_COLOR="${2:-$C_B_YELLOW}"
+    UI_HAS_OPTIONS=0
+    UI_ROWS=()
+    UI_OPEN=1
+}
+
+ui_add_row() {
+    local label="${2//$'\t'/ }" value="${3//$'\t'/ }"
+    label=${label//$'\n'/ }
+    value=${value//$'\n'/ }
+    UI_ROWS+=("$1"$'\t'"$label"$'\t'"$value")
+}
+
+ui_field() {
+    ui_add_row field "$1" "$2"
+}
+
+ui_option() {
+    local hint="${3:-}"
+    [[ -z "$hint" ]] || hint="（$hint）"
+    UI_HAS_OPTIONS=1
+    ui_add_row option "$1" "$2$hint"
+}
+
+ui_end() {
+    [[ ${UI_OPEN:-0} == 1 ]] || return 0
+    local columns="${COLUMNS:-80}" terminal_size
+    # SSH 终端未必导出 COLUMNS；可用时读取实际终端宽度。
+    if [[ -t 1 ]] && command -v stty >/dev/null 2>&1; then
+        terminal_size=$(stty size </dev/tty 2>/dev/null) || terminal_size=""
+        if [[ "$terminal_size" =~ ^[0-9]+[[:space:]]+([1-9][0-9]{0,3})$ ]]; then
+            columns=${BASH_REMATCH[1]}
+        fi
+    fi
+    [[ "$columns" =~ ^[1-9][0-9]{0,3}$ ]] || columns=80
+    ((columns >= 40)) || columns=40
+    ((columns <= 100)) || columns=100
+    local border title_color reset green blue yellow
+    printf -v border '%b' "$C_CYAN"
+    printf -v title_color '%b' "${UI_TITLE_COLOR:-$C_B_YELLOW}"
+    printf -v reset '%b' "$C_RESET"
+    printf -v green '%b' "$C_B_GREEN"
+    printf -v blue '%b' "$C_BLUE"
+    printf -v yellow '%b' "$C_YELLOW"
+    # awk 固定使用字节模式，自行读取 UTF-8；兼容 BusyBox awk 和 GNU awk。
+    {
+        if ((${#UI_ROWS[@]})); then printf '%s\n' "${UI_ROWS[@]}"; fi
+    } | LC_ALL=C UI_TABLE_TITLE="$UI_TITLE" UI_TABLE_MENU="${UI_HAS_OPTIONS:-0}" \
+        UI_TABLE_COUNT="${#UI_ROWS[@]}" UI_TABLE_BORDER="$border" UI_TABLE_TITLE_COLOR="$title_color" \
+        UI_TABLE_RESET="$reset" UI_TABLE_GREEN="$green" UI_TABLE_BLUE="$blue" UI_TABLE_YELLOW="$yellow" \
+        awk -v width="$((columns - 2))" '
+        function clean(s) {
+            gsub(/\033\[[0-?]*[ -\/]*[@-~]/, "", s)
+            gsub(/[[:cntrl:]]/, " ", s)
+            return s
+        }
+        function glyph(s, p,    b, n, i) {
+            b = byte[substr(s, p, 1)]; size = 1; code = b
+            if (b >= 194 && b <= 223) { size = 2; code = b - 192 }
+            else if (b >= 224 && b <= 239) { size = 3; code = b - 224 }
+            else if (b >= 240 && b <= 244) { size = 4; code = b - 240 }
+            for (i = 1; i < size; i++) code = code * 64 + byte[substr(s, p + i, 1)] - 128
+            cells = 1
+            if ((code >= 768 && code <= 879) || (code >= 6832 && code <= 6911) ||
+                (code >= 7616 && code <= 7679) || (code >= 8400 && code <= 8447) ||
+                (code >= 65024 && code <= 65039) || (code >= 65056 && code <= 65071) ||
+                (code >= 917760 && code <= 917999) || code == 8205) cells = 0
+            else if ((code >= 4352 && code <= 4447) || code == 9001 || code == 9002 ||
+                (code >= 11904 && code <= 42191 && code != 12351) ||
+                (code >= 44032 && code <= 55203) || (code >= 63744 && code <= 64255) ||
+                (code >= 65040 && code <= 65049) || (code >= 65072 && code <= 65135) ||
+                (code >= 65281 && code <= 65376) || (code >= 65504 && code <= 65510) ||
+                (code >= 127744 && code <= 129791) || (code >= 131072 && code <= 262141)) cells = 2
+            return substr(s, p, size)
+        }
+        function repeat(s, n,    out) {
+            out = ""; while (n-- > 0) out = out s
+            return out
+        }
+        function splitcell(s, limit, out,    p, ch, used, count) {
+            s = clean(s); p = 1; used = 0; count = 1; out[1] = ""
+            while (p <= length(s)) {
+                ch = glyph(s, p)
+                if (used + cells > limit) { count++; out[count] = ""; used = 0 }
+                out[count] = out[count] ch; used += cells; p += size
+            }
+            return count
+        }
+        function padded(s, limit,    p, used) {
+            p = 1; used = 0
+            while (p <= length(s)) { glyph(s, p); used += cells; p += size }
+            return s repeat(" ", limit - used)
+        }
+        function edge(s) { return border s reset }
+        function rule(a, b, c) { print edge(a repeat("─", left + 2) b repeat("─", right + 2) c) }
+        function fullrule(a, b, c) { print edge(a repeat(b, width - 2) c) }
+        function fullrow(s, style, indent,    n, i, parts) {
+            n = splitcell(s, width - 4 - indent, parts)
+            for (i = 1; i <= n; i++)
+                print edge("│") " " style repeat(" ", indent) padded(parts[i], width - 4 - indent) reset " " edge("│")
+        }
+        function title_row(s,    used, p, gap) {
+            used = 0; p = 1
+            while (p <= length(s)) { glyph(s, p); used += cells; p += size }
+            gap = int((width - 4 - used) / 2)
+            print edge("║") " " title_color repeat(" ", gap) padded(s, width - 4 - gap) reset " " edge("║")
+        }
+        function row(a, b,    ac, bc, n, i, aa, bb) {
+            ac = splitcell(a, left, aa); bc = splitcell(b, right, bb)
+            n = ac > bc ? ac : bc
+            for (i = 1; i <= n; i++)
+                print edge("│") " " padded(aa[i], left) " " edge("│") " " padded(bb[i], right) " " edge("│")
+        }
+        BEGIN {
+            for (i = 1; i < 256; i++) byte[sprintf("%c", i)] = i
+            border = ENVIRON["UI_TABLE_BORDER"]; reset = ENVIRON["UI_TABLE_RESET"]
+            title_color = ENVIRON["UI_TABLE_TITLE_COLOR"]; green = ENVIRON["UI_TABLE_GREEN"]
+            blue = ENVIRON["UI_TABLE_BLUE"]; yellow = ENVIRON["UI_TABLE_YELLOW"]
+            menu = ENVIRON["UI_TABLE_MENU"] == "1"
+            left = 10; right = width - left - 7
+            print ""; fullrule("╔", "═", "╗")
+            n = splitcell(ENVIRON["UI_TABLE_TITLE"], width - 4, title)
+            for (i = 1; i <= n; i++) title_row(title[i])
+            fullrule("╚", "═", "╝")
+            if (ENVIRON["UI_TABLE_COUNT"] > 0) {
+                print ""
+                if (menu) {
+                    heading = "选择操作"
+                    if (index(ENVIRON["UI_TABLE_TITLE"], "GitHub")) heading = "选择下载方式"
+                    else if (ENVIRON["UI_TABLE_TITLE"] == "固件类型选择") heading = "选择固件类型"
+                    else if (index(ENVIRON["UI_TABLE_TITLE"], "版本")) heading = "选择固件版本"
+                    fullrule("┌", "─", "┐"); fullrow(heading, reset, 0)
+                    fullrule("├", "─", "┤"); fullrow("", reset, 0)
+                } else {
+                    rule("┌", "┬", "┐"); row("项目", "详情"); rule("├", "┼", "┤")
+                }
+            }
+        }
+        {
+            tab = index($0, "\t"); kind = substr($0, 1, tab - 1); data = substr($0, tab + 1)
+            tab = index(data, "\t"); label = substr(data, 1, tab - 1); value = substr(data, tab + 1)
+            if (menu) {
+                if (kind == "option") {
+                    if (NR > 1) fullrow("", reset, 0)
+                    style = index(value, "默认") || index(value, "推荐") ? green : blue
+                    fullrow(label ") " value, style, 1)
+                    seen_option = 1
+                } else if (label == "说明" && seen_option) {
+                    fullrow("• " value, reset, 4)
+                } else {
+                    fullrow(label "：" value, label == "注意" ? yellow : reset, 1)
+                }
+            } else {
+                if (NR > 1) rule("├", "┼", "┤")
+                row(label, value)
+            }
+        }
+        END {
+            if (NR && menu) { fullrow("", reset, 0); fullrule("└", "─", "┘") }
+            else if (NR) rule("└", "┴", "┘")
+        }
+    '
+    UI_OPEN=0
+    UI_ROWS=()
+}
+
+ui_confirm() {
+    if [[ "$1" == Y ]]; then
+        ui_option y "$2" '默认'
+        ui_option n "$3"
+    else
+        ui_option y "$2"
+        ui_option n "$3" '默认'
+    fi
+    ui_end
+    printf '\n'
+}
+
+ui_prompt() {
+    if [[ "$1" == Y ]]; then
+        printf '请选择 [Y/n]（默认：y）：'
+    else
+        printf '请选择 [y/N]（默认：n）：'
+    fi
+}
+
 read_input() {
+    ui_end
     # EOF 不应当被当成回车，从而意外接受升级默认值。
     if ! IFS= read -r -p "$1" "$2"; then
         printf '\n输入已关闭，操作中止。\n' >&2
@@ -153,9 +348,15 @@ select_release() {
         printf '无法读取 Release：%s\n' "$(jq -r '.message // "缺少版本标签或附件列表"' <<< "$latest_info")" >&2
         return 1
     fi
-    printf '\n最新版本：%s\n' "$(jq -r '.tag_name' <<< "$latest_info")"
+    ui_section '固件版本选择'
+    ui_field '最新版本' "$(jq -r '.tag_name' <<< "$latest_info")"
+    printf '\n'
+    ui_option 0 '最新版本' '默认，直接回车'
+    ui_option h '历史版本'
+    ui_option q '取消升级'
+    printf '\n'
     while true; do
-        read_input '选择版本：0/回车 = 最新版本，h = 历史版本，q = 取消：' choice
+        read_input '请选择 [0/h/q]（默认：0）：' choice
         case "$choice" in
             ''|0) RELEASE_INFO="$latest_info"; break ;;
             h|H) break ;;
@@ -177,21 +378,27 @@ select_release() {
             choices=$(jq '[.[] | select(.draft != true and .prerelease != true)
                 | select((.tag_name | type) == "string" and (.assets | type) == "array")]' <<< "$history_info")
             count=$(jq 'length' <<< "$choices")
-            printf '\n历史版本（第 %s 页）：\n' "$page"
+            ui_section "历史版本（第 $page 页）"
             # 一次 jq 调用生成整页列表，避免逐个版本重复解析 JSON。
             while IFS=$'\t' read -r index tag available; do
                 if [[ "$available" == true ]]; then
-                    printf '  %2d) %s\n' "$index" "$tag"
+                    ui_option "$index" "$tag"
                 else
-                    printf '  %2d) %s（无当前型号/类型固件，不可选）\n' "$index" "$tag"
+                    ui_option "$index" "$tag" '无当前型号/类型固件，不可选'
                 fi
             done < <(jq -r --arg name "$IMAGE_FILENAME_GZ" '
                 to_entries[] | [(.key + 1), .value.tag_name,
                     any(.value.assets[]; .name == $name)] | @tsv' <<< "$choices")
-            ((count > 0)) || echo '  本页没有可显示的正式版本。'
+            ((count > 0)) || ui_field '说明' '本页没有可显示的正式版本。'
             ((raw_count < page_size)) && last_page=1 || last_page=0
+            printf '\n'
+            ui_option n '下一页'
+            ui_option p '上一页'
+            ui_option 0 '最新版本' '默认，直接回车'
+            ui_option q '取消升级'
+            printf '\n'
             while true; do
-                read_input '输入编号；n = 下一页，p = 上一页，0/回车 = 最新版本，q = 取消：' choice
+                read_input '请选择版本编号或操作（默认：0）：' choice
                 case "$choice" in
                     ''|0) RELEASE_INFO="$latest_info"; break 2 ;;
                     n|N)
@@ -269,30 +476,26 @@ check_dependencies() {
     UBUS_PRESENT=0
     if command -v ubus >/dev/null 2>&1; then UBUS_PRESENT=1; fi
     required_cmds_list="${required[*]}"
+    if prepare_aria2; then
+        ARIA2_STATUS='已就绪，支持 4 连接分段下载'
+    else
+        ARIA2_STATUS='未就绪，本次使用 wget/curl 下载'
+    fi
+    if command -v opkg >/dev/null 2>&1; then PKG_MANAGER=opkg
+    elif command -v apk >/dev/null 2>&1; then PKG_MANAGER=apk
+    fi
 }
 
 # --- 选择 GitHub 访问方式 ---
 select_github_access() {
-    echo
-    echo -e "${C_CYAN}╔═══════════════════════════════════════════════════════════════════════╗${C_RESET}"
-    echo -e "${C_CYAN}║${C_RESET}                 ${C_B_YELLOW}[#] GitHub 访问方式选择${C_RESET}                    ${C_CYAN}║${C_RESET}"
-    echo -e "${C_CYAN}╚═══════════════════════════════════════════════════════════════════════╝${C_RESET}"
-    echo
-    echo -e "${C_CYAN}┌───────────────────────────────────────────────────────────────────────┐${C_RESET}"
-    echo -e "${C_CYAN}│${C_RESET} ${C_B_BLUE}选择下载方式${C_RESET}                                                      ${C_CYAN}│${C_RESET}"
-    echo -e "${C_CYAN}├───────────────────────────────────────────────────────────────────────┤${C_RESET}"
-    echo -e "${C_CYAN}│${C_RESET}                                                                       ${C_CYAN}│${C_RESET}"
-    echo -e "${C_CYAN}│${C_RESET}  ${C_GREEN}1)${C_RESET} ${C_B_GREEN}ghfast.top 镜像加速${C_RESET} ${C_YELLOW}(推荐)${C_RESET}                               ${C_CYAN}│${C_RESET}"
-    echo -e "${C_CYAN}│${C_RESET}     ${C_CYAN}•${C_RESET} 适合网络受限环境                                           ${C_CYAN}│${C_RESET}"
-    echo -e "${C_CYAN}│${C_RESET}     ${C_CYAN}•${C_RESET} 下载速度更快                                               ${C_CYAN}│${C_RESET}"
-    echo -e "${C_CYAN}│${C_RESET}                                                                       ${C_CYAN}│${C_RESET}"
-    echo -e "${C_CYAN}│${C_RESET}  ${C_BLUE}2)${C_RESET} GitHub 官方直连                                              ${C_CYAN}│${C_RESET}"
-    echo -e "${C_CYAN}│${C_RESET}     ${C_CYAN}•${C_RESET} 需要稳定的国际网络连接                                     ${C_CYAN}│${C_RESET}"
-    echo -e "${C_CYAN}│${C_RESET}     ${C_CYAN}•${C_RESET} 直接从官方服务器下载                                       ${C_CYAN}│${C_RESET}"
-    echo -e "${C_CYAN}│${C_RESET}                                                                       ${C_CYAN}│${C_RESET}"
-    echo -e "${C_CYAN}└───────────────────────────────────────────────────────────────────────┘${C_RESET}"
-    echo
-    read_input "$(echo -e "${C_YELLOW}❓ 请选择访问方式 [1-2] (默认: ${C_B_GREEN}1${C_RESET}${C_YELLOW}): ${C_RESET}")" github_choice
+    ui_section 'GitHub 访问方式'
+    ui_option 1 'ghfast.top 镜像加速' '默认，推荐'
+    ui_field '说明' '适合网络受限环境。'
+    ui_field '说明' '通过镜像加速下载。'
+    ui_option 2 'GitHub 官方直连'
+    ui_field '说明' '需要稳定的国际网络连接。'
+    ui_field '说明' '直接从官方服务器下载。'
+    read_input '请选择 [1/2]（默认：1）：' github_choice
     github_choice=${github_choice:-1}
     
     echo
@@ -522,26 +725,22 @@ trap 'exit 143' TERM
 echo "信息：本次任务的临时目录为 $TMP_DIR"
 
 echo
-echo -e "${C_BLUE}=====================================================================${C_RESET}"
-echo -e "${C_BLUE} OpenWRT/ImmortalWrt 自动升级脚本 ${C_RESET}"
-echo -e "${C_BLUE}=====================================================================${C_RESET}"
+ui_section 'OpenWrt / ImmortalWrt 自动升级'
+ui_end
 echo
 
 # --- 1. 检查并尝试安装依赖项 ---
 echo -e "${C_BLUE}--- 步骤 1: 检查并尝试安装依赖项 ---${C_RESET}"
-echo -e "${C_BLUE}信息：${C_RESET}检查所需工具 (curl/wget, jq, gunzip, awk, sha256sum, lsblk)..."
+echo -e "${C_BLUE}信息：${C_RESET}检查所需工具 (curl/wget, jq, gunzip, awk, sha256sum, lsblk)，并准备 aria2c 下载加速..."
 
 check_dependencies || exit 1
 
-# 显示依赖项检查总结表格
+ui_section '依赖检查结果'
+ui_field '包管理器' "$PKG_MANAGER"
+ui_field '必需命令' "$required_cmds_list"
+ui_field 'Aria2' "$ARIA2_STATUS"
+ui_end
 echo
-echo -e "${C_CYAN}┌──────────────────────────┬────────────────────────────────────────────┐${C_RESET}"
-echo -e "${C_CYAN}│${C_RESET} ${C_B_BLUE}依赖项检查总结${C_RESET}           ${C_CYAN}│${C_RESET} ${C_B_BLUE}状态${C_RESET}                                   ${C_CYAN}│${C_RESET}"
-echo -e "${C_CYAN}╞══════════════════════════╪════════════════════════════════════════════╡${C_RESET}"
-printf "${C_CYAN}│${C_RESET} ${C_GREEN}[√]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_GREEN}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "包管理器" "$PKG_MANAGER"
-echo -e "${C_CYAN}├──────────────────────────┼────────────────────────────────────────────┤${C_RESET}"
-printf "${C_CYAN}│${C_RESET} ${C_GREEN}[√]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_GREEN}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "必需命令" "已找到所有依赖 ($required_cmds_list)"
-echo -e "${C_CYAN}└──────────────────────────┴────────────────────────────────────────────┘${C_RESET}"
 echo -e "${C_BLUE}--- 步骤 1 完成 ---${C_RESET}"
 echo
 
@@ -612,64 +811,27 @@ echo -e "${C_CYAN}>> 文件系统使用情况 (df -hT):${C_RESET}"
 df -hT | sed 's/^/  /' || echo -e "  ${C_YELLOW}无法获取文件系统使用情况。${C_RESET}"
 echo
 
-# 系统信息总结表格
-echo
-echo -e "${C_CYAN}┌──────────────────────────┬────────────────────────────────────────────┐${C_RESET}"
-echo -e "${C_CYAN}│${C_RESET} ${C_B_BLUE}系统信息总结${C_RESET}             ${C_CYAN}│${C_RESET} ${C_B_BLUE}详情${C_RESET}                                   ${C_CYAN}│${C_RESET}"
-echo -e "${C_CYAN}╞══════════════════════════╪════════════════════════════════════════════╡${C_RESET}"
-
-# 内存信息
-if [ -n "$mem_total_kib" ]; then
+ui_section '系统信息汇总'
+if [[ -n "$mem_total_kib" ]]; then
     mem_total_mib=$(awk -v total_kib="$mem_total_kib" 'BEGIN { printf "%.0f MiB", total_kib/1024 }')
-    if [ -n "$mem_avail_kib" ]; then
-        mem_avail_mib=$(awk -v avail_kib="$mem_avail_kib" 'BEGIN { printf "%.0f MiB", avail_kib/1024 }')
-        printf "${C_CYAN}│${C_RESET} ${C_GREEN}[√]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_GREEN}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "内存" "总计: $mem_total_mib / 可用: $mem_avail_mib"
-    else
-        printf "${C_CYAN}│${C_RESET} ${C_GREEN}[√]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_GREEN}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "内存" "总计: $mem_total_mib"
-    fi
 else
-    printf "${C_CYAN}│${C_RESET} ${C_YELLOW}[-]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_YELLOW}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "内存" "无法获取"
+    mem_total_mib='无法获取'
 fi
-
-echo -e "${C_CYAN}├──────────────────────────┼────────────────────────────────────────────┤${C_RESET}"
-
-# 设备型号
-if [ $model_info_found -eq 1 ]; then
-    if [ -n "$model" ]; then
-        # 截断过长的型号名
-        if [ ${#model} -gt 42 ]; then
-            model_display="${model:0:39}..."
-        else
-            model_display="$model"
-        fi
-        printf "${C_CYAN}│${C_RESET} ${C_GREEN}[√]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_GREEN}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "设备型号" "$model_display"
-    elif [ -n "$model_sysinfo" ]; then
-        if [ ${#model_sysinfo} -gt 42 ]; then
-            model_display="${model_sysinfo:0:39}..."
-        else
-            model_display="$model_sysinfo"
-        fi
-        printf "${C_CYAN}│${C_RESET} ${C_GREEN}[√]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_GREEN}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "设备型号" "$model_display"
-    else
-        printf "${C_CYAN}│${C_RESET} ${C_YELLOW}[-]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_YELLOW}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "设备型号" "未知"
-    fi
+if [[ -n "$mem_avail_kib" ]]; then
+    mem_avail_mib=$(awk -v avail_kib="$mem_avail_kib" 'BEGIN { printf "%.0f MiB", avail_kib/1024 }')
 else
-    printf "${C_CYAN}│${C_RESET} ${C_YELLOW}[-]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_YELLOW}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "设备型号" "无法确定"
+    mem_avail_mib='无法获取'
 fi
-
-echo -e "${C_CYAN}├──────────────────────────┼────────────────────────────────────────────┤${C_RESET}"
-
-# /tmp 空间
+ui_field '设备型号' "${model:-${model_sysinfo:-${model_dt:-未知}}}"
+ui_field '内存总量' "$mem_total_mib"
+ui_field '可用内存' "$mem_avail_mib"
+ui_field '启动介质' "$BOOT_MEDIUM"
+ui_field '启动磁盘' "${BOOT_DISK:+/dev/}${BOOT_DISK:-未识别}"
 tmp_size=$(df -h /tmp 2>/dev/null | awk 'NR==2 {print $2}')
 tmp_avail=$(df -h /tmp 2>/dev/null | awk 'NR==2 {print $4}')
-if [ -n "$tmp_size" ] && [ -n "$tmp_avail" ]; then
-    printf "${C_CYAN}│${C_RESET} ${C_GREEN}[√]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_GREEN}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "/tmp 空间" "总计: $tmp_size / 可用: $tmp_avail"
-else
-    printf "${C_CYAN}│${C_RESET} ${C_YELLOW}[-]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_YELLOW}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "/tmp 空间" "无法获取"
-fi
-
-echo -e "${C_CYAN}└──────────────────────────┴────────────────────────────────────────────┘${C_RESET}"
-
+ui_field '临时空间' "总计: ${tmp_size:-未知} / 可用: ${tmp_avail:-未知}"
+ui_end
+echo
 echo -e "${C_BLUE}--- 步骤 2 完成 ---${C_RESET}"
 echo
 
@@ -689,18 +851,12 @@ echo
 
 # --- 4. 临时增大 /tmp 分区 ---
 echo -e "${C_BLUE}--- 步骤 4: 临时增大 /tmp 分区 ---${C_RESET}"
-echo
-echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
-echo -e "${C_B_YELLOW}[*] /tmp 分区扩容选项${C_RESET}"
-echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
-echo -e "  ${C_BLUE}提示：${C_RESET}可以临时将 /tmp 分区扩大到 RAM 的 100%"
-echo -e "  ${C_GREEN}• 有助于存储固件、解压镜像及升级配置备份${C_RESET}"
-echo -e "  ${C_YELLOW}• 此更改仅在本次运行期间有效，重启后失效${C_RESET}"
-echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
-echo -e "\n${C_BLUE}信息：${C_RESET}/tmp 当前大小:"
-df -h /tmp | sed 's/^/  /'
-echo
-read_input "$(echo -e "${C_YELLOW}❓ 是否临时扩大 /tmp 分区？(Y/n) [默认: ${C_B_GREEN}是${C_RESET}${C_YELLOW}]: ${C_RESET}")" confirm_resize_tmp
+ui_section '临时扩大 /tmp 分区'
+ui_field '说明' '将 /tmp 挂载上限临时调整到 RAM 的 100%，重启后失效。'
+ui_field '说明' '用于存储固件和配置备份，不会增加物理内存。'
+ui_field '临时空间' "$(df -h /tmp | awk 'NR==2 {printf "总计: %s / 可用: %s", $2, $4}')"
+ui_confirm Y '临时扩大 /tmp 分区' '保持当前大小'
+read_input "$(ui_prompt Y)" confirm_resize_tmp
 confirm_resize_tmp=${confirm_resize_tmp:-Y}  # 默认为Y
 
 if [[ "$confirm_resize_tmp" =~ ^[Yy]$ ]]; then
@@ -729,29 +885,18 @@ echo
 
 # --- 6. 下载前确认 ---
 echo -e "${C_BLUE}--- 步骤 6: 下载前确认 ---${C_RESET}"
-echo
-echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
-echo -e "${C_B_YELLOW}[↓] 固件下载确认${C_RESET}"
-echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
-echo
-echo -e "${C_CYAN}┌──────────────────────────┬────────────────────────────────────────────┐${C_RESET}"
-echo -e "${C_CYAN}│${C_RESET} ${C_B_BLUE}项目${C_RESET}                     ${C_CYAN}│${C_RESET} ${C_B_BLUE}详情${C_RESET}                                   ${C_CYAN}│${C_RESET}"
-echo -e "${C_CYAN}╞══════════════════════════╪════════════════════════════════════════════╡${C_RESET}"
-printf "${C_CYAN}│${C_RESET} ${C_CYAN}[#]${C_RESET} %-20s ${C_CYAN}│${C_RESET} " "版本标签"
-echo -e "${C_GREEN}${RELEASE_TAG}${C_RESET}$(printf '%*s' $((42 - ${#RELEASE_TAG})) '') ${C_CYAN}│${C_RESET}"
-echo -e "${C_CYAN}├──────────────────────────┼────────────────────────────────────────────┤${C_RESET}"
-printf "${C_CYAN}│${C_RESET} ${C_CYAN}[↓]${C_RESET} %-20s ${C_CYAN}│${C_RESET} %-42s ${C_CYAN}│${C_RESET}\\n" "固件文件" "$(basename "$IMAGE_FILENAME_GZ")"
-echo -e "${C_CYAN}├──────────────────────────┼────────────────────────────────────────────┤${C_RESET}"
-if [ $SKIP_CHECKSUM -eq 1 ]; then 
-    printf "${C_CYAN}│${C_RESET} ${C_YELLOW}[-]${C_RESET} %-20s ${C_CYAN}│${C_RESET} ${C_YELLOW}%-42s${C_RESET} ${C_CYAN}│${C_RESET}\\n" "校验文件" "未找到"
-else 
-    printf "${C_CYAN}│${C_RESET} ${C_GREEN}[√]${C_RESET} %-20s ${C_CYAN}│${C_RESET} %-42s ${C_CYAN}│${C_RESET}\\n" "校验文件" "$(basename "$CHECKSUM_FILENAME")"
+ui_section '固件下载确认'
+ui_field '版本标签' "$RELEASE_TAG"
+ui_field '固件文件' "$IMAGE_FILENAME_GZ"
+if [[ "$SKIP_CHECKSUM" == 1 ]]; then
+    ui_field '校验文件' '未找到，将跳过 SHA256 校验'
+else
+    ui_field '校验文件' "$CHECKSUM_FILENAME"
 fi
-echo -e "${C_CYAN}├──────────────────────────┼────────────────────────────────────────────┤${C_RESET}"
-printf "${C_CYAN}│${C_RESET} ${C_CYAN}[>]${C_RESET} %-20s ${C_CYAN}│${C_RESET} %-42s ${C_CYAN}│${C_RESET}\\n" "保存路径" "$TMP_DIR"
-echo -e "${C_CYAN}└──────────────────────────┴────────────────────────────────────────────┘${C_RESET}"
-echo
-read_input "$(echo -e "\n${C_YELLOW}❓ 是否开始下载此固件文件？(Y/n) [默认: ${C_B_GREEN}是${C_RESET}${C_YELLOW}]: ${C_RESET}")" confirm_download
+ui_field '保存路径' "$TMP_DIR"
+printf '\n'
+ui_confirm Y '开始下载固件' '取消下载'
+read_input "$(ui_prompt Y)" confirm_download
 confirm_download=${confirm_download:-Y}  # 默认为Y
 if [[ ! "$confirm_download" =~ ^[Yy]$ ]]; then echo -e "${C_YELLOW}操作已取消，未下载固件。${C_RESET}"; exit 0; fi
 echo
@@ -781,15 +926,11 @@ echo -e "${C_BLUE}--- 步骤 8: 校验固件完整性 (SHA256) ---${C_RESET}"
 if [ $SKIP_CHECKSUM -eq 1 ]; then
     echo -e "${C_YELLOW}信息：由于之前步骤未能找到或下载校验文件，跳过文件完整性校验。${C_RESET}"
 else
-    echo
-    echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
-    echo -e "${C_B_YELLOW}[#] 文件完整性校验选项${C_RESET}"
-    echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
-    echo -e "  ${C_BLUE}提示：${C_RESET}执行 SHA256 校验可以确保固件文件完整性"
-    echo -e "  ${C_GREEN}• 推荐执行校验以确保固件未被损坏或篡改${C_RESET}"
-    echo -e "  ${C_YELLOW}• 跳过校验可能导致升级失败或系统损坏${C_RESET}"
-    echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
-    read_input "$(echo -e "\n${C_YELLOW}❓ 是否执行 SHA256 固件完整性校验？(Y/n) [默认: ${C_B_GREEN}是${C_RESET}${C_YELLOW}]: ${C_RESET}")" confirm_run_checksum
+    ui_section '固件完整性校验'
+    ui_field '说明' '推荐执行 SHA256 校验，检查固件是否损坏或被篡改。'
+    ui_field '注意' '跳过校验可能导致升级失败或系统损坏。'
+    ui_confirm Y '执行 SHA256 校验' '跳过 SHA256 校验'
+    read_input "$(ui_prompt Y)" confirm_run_checksum
     confirm_run_checksum=${confirm_run_checksum:-Y}  # 默认为Y
 
     if [[ "$confirm_run_checksum" =~ ^[Nn]$ ]]; then
@@ -803,21 +944,19 @@ else
              SKIP_CHECKSUM=1
         else
             CALCULATED_SUM=$(sha256sum "$IMAGE_PATH_GZ" | awk '{print $1}')
-            echo
-            echo -e "${C_CYAN}┌──────────────────────────┬────────────────────────────────────────────┐${C_RESET}"
-            echo -e "${C_CYAN}│${C_RESET} ${C_B_BLUE}校验项${C_RESET}                   ${C_CYAN}│${C_RESET} ${C_B_BLUE}SHA256 哈希值${C_RESET}                          ${C_CYAN}│${C_RESET}"
-            echo -e "${C_CYAN}╞══════════════════════════╪════════════════════════════════════════════╡${C_RESET}"
-            printf "${C_CYAN}│${C_RESET} ${C_CYAN}[>]${C_RESET} %-20s ${C_CYAN}│${C_RESET} %-42s ${C_CYAN}│${C_RESET}\\n" "期望值" "$EXPECTED_SUM"
-            echo -e "${C_CYAN}├──────────────────────────┼────────────────────────────────────────────┤${C_RESET}"
-            printf "${C_CYAN}│${C_RESET} ${C_CYAN}[>]${C_RESET} %-20s ${C_CYAN}│${C_RESET} %-42s ${C_CYAN}│${C_RESET}\\n" "计算值" "$CALCULATED_SUM"
-            echo -e "${C_CYAN}└──────────────────────────┴────────────────────────────────────────────┘${C_RESET}"
-            echo
+            ui_section 'SHA256 校验结果'
+            ui_field '期望校验' "$EXPECTED_SUM"
+            ui_field '实际校验' "$CALCULATED_SUM"
+            ui_end
+            printf '\n'
             if [ "$EXPECTED_SUM" == "$CALCULATED_SUM" ]; then
                 echo -e "${C_B_GREEN}✅ 校验成功！文件完整。${C_RESET}"
             else
                 echo; echo -e "${C_B_RED}❌ 错误：SHA256 校验和不匹配！文件可能已损坏或不完整。${C_RESET}"; echo
                 confirm_checksum_fail=""
-                read_input "$(echo -e "${C_B_YELLOW}❓ 警告：文件校验失败！是否仍要继续升级？(y/N): ${C_RESET}")" confirm_checksum_fail
+                ui_section '校验失败后的操作' "$C_B_RED"
+                ui_confirm N '忽略校验失败，继续升级' '中止升级'
+                read_input "$(ui_prompt N)" confirm_checksum_fail
                 if [[ ! "$confirm_checksum_fail" =~ ^[Yy]$ ]]; then echo -e "${C_YELLOW}操作中止。${C_RESET}"; exit 1; fi
                 echo -e "${C_YELLOW}信息：用户选择忽略校验失败并继续。${C_RESET}"
                 SKIP_CHECKSUM=1
@@ -840,15 +979,9 @@ echo
 echo -e "${C_BLUE}--- 步骤 10: 检查空间并确定升级选项 ---${C_RESET}"
 echo '信息：按实际配置备份大小检查资源，空间不足时停止，不自动清除配置。'
 SYSUPGRADE_ARGS=""
-echo
-echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
-echo -e "${C_B_YELLOW}[+] 配置数据保留选项${C_RESET}"
-echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
-echo -e "  ${C_BLUE}提示：${C_RESET}您可以选择在升级时保留或清除配置数据"
-echo -e "  ${C_GREEN}• 保留配置${C_RESET} - 升级后保留当前系统设置"
-echo -e "  ${C_YELLOW}• 清除配置${C_RESET} - 升级后恢复为出厂设置"
-echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
-read_input "$(echo -e "\n${C_YELLOW}❓ 是否保留配置数据？(Y/n) [默认: ${C_B_GREEN}是${C_RESET}${C_YELLOW}]: ${C_RESET}")" confirm_keep_data
+ui_section '配置数据保留'
+ui_confirm Y '保留当前配置' '清除配置，恢复出厂设置'
+read_input "$(ui_prompt Y)" confirm_keep_data
 confirm_keep_data=${confirm_keep_data:-Y}  # 默认为Y
 if [[ "$confirm_keep_data" =~ ^[Nn]$ ]]; then
     echo -e "${C_BLUE}信息：${C_RESET}用户选择【${C_YELLOW}不保留${C_RESET}】配置数据进行升级。"
@@ -865,118 +998,75 @@ echo
 echo -e "${C_BLUE}--- 步骤 11: 配置可选参数并最终确认 ---${C_RESET}"
 printf '信息：当前启动介质：%s；启动盘：%s%s（由 sysupgrade 识别升级目标）。\n' \
     "$BOOT_MEDIUM" "${BOOT_DISK:+/dev/}" "${BOOT_DISK:-未识别}"
-# 这些变量在后面构建表格时使用，此处不再需要预先构建UPGRADE_INFO字符串
 
 # --- 询问是否强制升级 (-F) ---
 FORCE_FLAG=""
-echo -e "\n${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
-echo -e "${C_B_RED}[!] 强制升级选项 (-F)${C_RESET}"
-echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
-echo -e "  ${C_YELLOW}警告：${C_RESET}'-F' 选项会跳过固件兼容性检查"
-echo -e "  ${C_RED}• 使用不兼容的固件可能导致设备变砖！${C_RESET}"
-echo -e "  ${C_YELLOW}• 仅在您完全确定固件正确且了解风险时才使用${C_RESET}"
-echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
-read_input "$(echo -e "\n${C_B_YELLOW}❓ 是否使用强制升级 '-F' 选项？(y/N) [默认: ${C_B_GREEN}否${C_RESET}${C_B_YELLOW}]: ${C_RESET}")" confirm_force
+ui_section '强制升级选项 (-F)' "$C_B_YELLOW"
+ui_field '注意' '强制升级会跳过固件兼容性检查，不兼容的固件可能导致设备无法启动。'
+ui_field '提示' '请仅在确认固件正确并了解风险时使用。'
+ui_confirm N '使用强制升级 (-F)' '执行常规升级'
+read_input "$(ui_prompt N)" confirm_force
 confirm_force=${confirm_force:-N}  # 默认为N
-FORCE_FLAG_INFO=""
 if [[ "$confirm_force" =~ ^[Yy]$ ]]; then
     echo -e "${C_BLUE}信息：${C_RESET}用户选择【${C_B_RED}使用${C_RESET}】强制 '-F' 选项！"
-    FORCE_FLAG="-F"; FORCE_FLAG_INFO="${C_B_RED}是 (-F)${C_RESET}";
+    FORCE_FLAG="-F";
 else
     echo -e "${C_BLUE}信息：${C_RESET}本次升级将【${C_GREEN}不使用${C_RESET}】强制 '-F' 选项。"
-    FORCE_FLAG=""; FORCE_FLAG_INFO="${C_GREEN}否${C_RESET}";
+    FORCE_FLAG="";
 fi
 
 # --- 询问是否详细输出 (-v) ---
 VERBOSE_FLAG=""
-echo
-echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
-echo -e "${C_B_YELLOW}[i] 详细日志选项 (-v)${C_RESET}"
-echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
-echo -e "  ${C_BLUE}提示：${C_RESET}启用详细输出可查看升级过程的详细信息"
-echo -e "  ${C_YELLOW}• 一般用户建议使用默认模式${C_RESET}"
-echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
-read_input "$(echo -e "\n${C_YELLOW}❓ 是否启用详细输出模式？(y/N) [默认: ${C_B_GREEN}否${C_RESET}${C_YELLOW}]: ${C_RESET}")" confirm_verbose
+ui_section '详细日志选项 (-v)'
+ui_confirm N '显示详细升级日志' '使用简洁输出'
+read_input "$(ui_prompt N)" confirm_verbose
 confirm_verbose=${confirm_verbose:-N}  # 默认为N
-VERBOSE_FLAG_INFO=""
 if [[ "$confirm_verbose" =~ ^[Yy]$ ]]; then
     echo -e "${C_BLUE}信息：${C_RESET}用户选择【${C_GREEN}启用${C_RESET}】详细输出模式 (-v)。"
-    VERBOSE_FLAG="-v"; VERBOSE_FLAG_INFO="${C_GREEN}是 (-v)${C_RESET}";
+    VERBOSE_FLAG="-v";
 else
     echo -e "${C_BLUE}信息：${C_RESET}本次升级将【${C_YELLOW}不启用${C_RESET}】详细输出模式。"
-    VERBOSE_FLAG=""; VERBOSE_FLAG_INFO="${C_YELLOW}否${C_RESET}";
+    VERBOSE_FLAG="";
 fi
 
 # --- 最终确认与执行 ---
-echo
-echo -e "${C_CYAN}╔═════════════════════════════════════════════════════════════════════╗${C_RESET}"
-echo -e "${C_CYAN}║${C_RESET}                   ${C_B_YELLOW}[=] 升级前最终确认${C_RESET}                      ${C_CYAN}║${C_RESET}"
-echo -e "${C_CYAN}╚═════════════════════════════════════════════════════════════════════╝${C_RESET}"
-echo
-
-# 构建表格内容
-DATA_MODE_INFO=""
-if [ "$SYSUPGRADE_ARGS" == "-n" ]; then
-    DATA_MODE_INFO="${C_YELLOW}不保留配置 (-n)${C_RESET}"
+ui_section '升级前最终确认'
+ui_field '固件文件' "${IMAGE_PATH##*/}"
+ui_field '版本标签' "$RELEASE_TAG"
+ui_field '启动介质' "$BOOT_MEDIUM"
+ui_field '启动磁盘' "${BOOT_DISK:+/dev/}${BOOT_DISK:-未识别}"
+if [[ "$UPGRADE_MODE" == compressed ]]; then
+    ui_field '升级方式' '压缩镜像流式升级'
 else
-    DATA_MODE_INFO="${C_GREEN}保留配置${C_RESET}"
+    ui_field '升级方式' '先解压镜像再升级'
 fi
-
-CHECKSUM_INFO=""
-if [ $SKIP_CHECKSUM -eq 1 ]; then
-    CHECKSUM_INFO="${C_YELLOW}跳过/未执行${C_RESET}"
+if [[ "$SYSUPGRADE_ARGS" == -n ]]; then
+    ui_field '配置数据' '清除配置 (-n)'
 else
-    CHECKSUM_INFO="${C_GREEN}SHA256 已验证${C_RESET}"
+    ui_field '配置数据' '保留当前配置'
 fi
-
-echo -e "${C_CYAN}┌──────────────────────────┬────────────────────────────────────────────┐${C_RESET}"
-echo -e "${C_CYAN}│${C_RESET} ${C_B_BLUE}项目${C_RESET}                     ${C_CYAN}│${C_RESET} ${C_B_BLUE}详情${C_RESET}                                   ${C_CYAN}│${C_RESET}"
-echo -e "${C_CYAN}╞══════════════════════════╪════════════════════════════════════════════╡${C_RESET}"
-printf "${C_CYAN}│${C_RESET} ${C_CYAN}[>]${C_RESET} %-20s ${C_CYAN}│${C_RESET} %-42s ${C_CYAN}│${C_RESET}\\n" "固件文件" "$(basename "$IMAGE_PATH")"
-echo -e "${C_CYAN}├──────────────────────────┼────────────────────────────────────────────┤${C_RESET}"
-printf "${C_CYAN}│${C_RESET} ${C_CYAN}[#]${C_RESET} %-20s ${C_CYAN}│${C_RESET} " "版本标签"
-echo -e "${C_GREEN}${RELEASE_TAG}${C_RESET}$(printf '%*s' $((42 - ${#RELEASE_TAG})) '') ${C_CYAN}│${C_RESET}"
-echo -e "${C_CYAN}├──────────────────────────┼────────────────────────────────────────────┤${C_RESET}"
-# 配置数据行带图标
-if [ "$SYSUPGRADE_ARGS" == "-n" ]; then
-    printf "${C_CYAN}│${C_RESET} ${C_YELLOW}[×]${C_RESET} %-20s ${C_CYAN}│${C_RESET} " "配置数据"
+if [[ -n "$FORCE_FLAG" ]]; then
+    ui_field '强制升级' '是 (-F)'
 else
-    printf "${C_CYAN}│${C_RESET} ${C_GREEN}[√]${C_RESET} %-20s ${C_CYAN}│${C_RESET}" "配置数据"
+    ui_field '强制升级' '否'
 fi
-echo -e "${DATA_MODE_INFO}$(printf '%*s' $((42 - $(echo -e "${DATA_MODE_INFO}" | sed 's/\x1b\[[0-9;]*m//g' | wc -c) + 1)) '') ${C_CYAN}│${C_RESET}"
-echo -e "${C_CYAN}├──────────────────────────┼────────────────────────────────────────────┤${C_RESET}"
-# 强制升级行
-if [[ "$FORCE_FLAG_INFO" == *"是"* ]]; then
-    printf "${C_CYAN}│${C_RESET} ${C_B_RED}[!]${C_RESET} %-20s ${C_CYAN}│${C_RESET} " "强制升级 (-F)"
+if [[ -n "$VERBOSE_FLAG" ]]; then
+    ui_field '详细输出' '是 (-v)'
 else
-    printf "${C_CYAN}│${C_RESET} ${C_GREEN}[✓]${C_RESET} %-20s ${C_CYAN}│${C_RESET} " "强制升级 (-F)"
+    ui_field '详细输出' '否'
 fi
-echo -e "${FORCE_FLAG_INFO}$(printf '%*s' $((42 - $(echo -e "${FORCE_FLAG_INFO}" | sed 's/\x1b\[[0-9;]*m//g' | wc -c) + 1)) '') ${C_CYAN}│${C_RESET}"
-echo -e "${C_CYAN}├──────────────────────────┼────────────────────────────────────────────┤${C_RESET}"
-# 详细输出行
-if [[ "$VERBOSE_FLAG_INFO" == *"是"* ]]; then
-    printf "${C_CYAN}│${C_RESET} ${C_GREEN}[i]${C_RESET} %-20s ${C_CYAN}│${C_RESET} " "详细输出 (-v)"
+if [[ "$SKIP_CHECKSUM" == 1 ]]; then
+    ui_field '文件校验' '跳过 / 未执行'
 else
-    printf "${C_CYAN}│${C_RESET} ${C_YELLOW}[-]${C_RESET} %-20s ${C_CYAN}│${C_RESET} " "详细输出 (-v)"
+    ui_field '文件校验' 'SHA256 已验证'
 fi
-echo -e "${VERBOSE_FLAG_INFO}$(printf '%*s' $((42 - $(echo -e "${VERBOSE_FLAG_INFO}" | sed 's/\x1b\[[0-9;]*m//g' | wc -c) + 1)) '') ${C_CYAN}│${C_RESET}"
-echo -e "${C_CYAN}├──────────────────────────┼────────────────────────────────────────────┤${C_RESET}"
-# 文件校验行
-if [ $SKIP_CHECKSUM -eq 1 ]; then
-    printf "${C_CYAN}│${C_RESET} ${C_YELLOW}[-]${C_RESET} %-20s ${C_CYAN}│${C_RESET} " "文件校验"
-else
-    printf "${C_CYAN}│${C_RESET} ${C_GREEN}[√]${C_RESET} %-20s ${C_CYAN}│${C_RESET} " "文件校验"
+printf '\n'
+if [[ -z "$SYSUPGRADE_ARGS" ]]; then
+    ui_field '提示' '建议提前备份重要数据。'
 fi
-echo -e "${CHECKSUM_INFO}$(printf '%*s' $((42 - $(echo -e "${CHECKSUM_INFO}" | sed 's/\x1b\[[0-9;]*m//g' | wc -c) + 1)) '') ${C_CYAN}│${C_RESET}"
-echo -e "${C_CYAN}└──────────────────────────┴────────────────────────────────────────────┘${C_RESET}"
-echo
-
-if [ -z "$SYSUPGRADE_ARGS" ]; then
-    echo -e "${C_YELLOW}[*] 提示：${C_RESET}建议提前备份重要数据"
-fi
-echo -e "${C_B_RED}[!] 警告：${C_RESET}升级过程中请务必保持设备通电，不要中断操作！"
-echo
-read_input "$(echo -e "${C_B_GREEN}❓ 确认开始执行 sysupgrade 升级？(Y/n) [默认: ${C_B_GREEN}是${C_RESET}]: ${C_RESET}")" confirm_upgrade
+ui_field '注意' '升级期间请保持设备通电，不要中断操作。'
+ui_confirm Y '确认开始升级' '取消升级，保留镜像'
+read_input "$(ui_prompt Y)" confirm_upgrade
 confirm_upgrade=${confirm_upgrade:-Y}  # 默认为Y
 
 if [[ "$confirm_upgrade" =~ ^[Yy]$ ]]; then
@@ -1020,7 +1110,9 @@ if [[ "$confirm_upgrade" =~ ^[Yy]$ ]]; then
                 echo -e "${C_YELLOW}分析：升级失败通常是因为固件版本检查不通过 (如 'Image metadata not present' 或 'Image check failed')。${C_RESET}"
                 echo -e "${C_YELLOW}      这在跨版本升级或刷写不同固件时很常见。${C_RESET}"
                 
-                read_input "$(echo -e "\n${C_B_YELLOW}❓ 是否尝试使用强制升级 '-F' 选项重试？(y/N) [默认: ${C_B_GREEN}是${C_RESET}${C_B_YELLOW}]: ${C_RESET}")" retry_force
+                ui_section '升级失败后的操作' "$C_B_YELLOW"
+                ui_confirm Y '使用强制升级 (-F) 重试' '不重试，退出脚本'
+                read_input "$(ui_prompt Y)" retry_force
                 retry_force=${retry_force:-Y}
                 
                 if [[ "$retry_force" =~ ^[Yy]$ ]]; then
