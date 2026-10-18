@@ -24,8 +24,9 @@ C_B_YELLOW='\033[1;33m'   # 粗体黄色
 REPO="xuanranran/OpenWrt_RockChip"                                        # 目标 GitHub 仓库
 # 注意：固件文件名将根据机型和Docker选择动态生成
 TMP_DIR="/tmp"                                                             # 临时文件目录
-THRESHOLD_KIB=614400                                                       # 保留数据的空间阈值 (600 MiB in KiB)
-MEM_THRESHOLD_KIB=1048576                                                  # 运行脚本的最低内存阈值 (1 GiB = 1024*1024 KiB)
+WORK_RESERVE_KIB=65536                                                    # 为升级环境和解压缓冲预留 64 MiB
+KEEP_IMAGE=0                                                             # 完成压缩流检查后，取消/失败时保留镜像
+UPGRADE_MODE=compressed                                                  # compressed 或 extracted
 
 # GitHub 访问方式配置（将在用户选择后设置）
 GITHUB_PROXY=""  # GitHub 代理前缀
@@ -35,13 +36,15 @@ USE_DOCKER=false  # 是否使用 Docker 版本
 
 # 设备型号（将自动检测）
 DEVICE_MODEL=""  # 设备型号标识
+BOOT_DISK=""     # 当前启动盘，由系统升级函数识别
+BOOT_MEDIUM="未识别"
 
 # 动态文件名（将在检测型号和Docker选择后生成）
 IMAGE_FILENAME_GZ=""  # 压缩固件的文件名
-IMAGE_FILENAME_IMG=""  # 解压后的固件文件名
 CHECKSUM_FILENAME=""  # 校验和文件名
 IMAGE_PATH_GZ=""  # 压缩固件的完整路径
-IMAGE_PATH_IMG=""  # 解压后固件的完整路径
+IMAGE_PATH_IMG="" # 解压固件的完整路径
+IMAGE_PATH=""     # 最终交给 sysupgrade 的镜像
 CHECKSUM_PATH=""  # 校验和文件的完整路径
 
 # 两个平台脚本保持独立，以下通用函数应同步维护。
@@ -434,14 +437,184 @@ detect_device_model() {
     return 0
 }
 
+# 只读取当前启动盘，不能根据 mmcblk 编号或是否存在 eMMC 猜测升级目标。
+get_boot_disk() {
+    sh -c '
+        . /lib/functions.sh && . /lib/upgrade/common.sh &&
+        export_bootdevice && export_partdevice diskdev 0 &&
+        printf "%s\n" "$diskdev"
+    ' 2>/dev/null
+}
+
+detect_boot_medium() {
+    local mmc_type
+    BOOT_DISK=$(get_boot_disk) || BOOT_DISK=""
+    BOOT_MEDIUM='未识别'
+    if [[ "$BOOT_DISK" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        mmc_type=$(cat "/sys/class/block/$BOOT_DISK/device/type" 2>/dev/null) || mmc_type=""
+        case "$mmc_type" in
+            SD) BOOT_MEDIUM='SD 卡' ;;
+            MMC) BOOT_MEDIUM='eMMC' ;;
+            *) BOOT_MEDIUM='其他存储介质' ;;
+        esac
+        printf '信息：当前启动介质：%s；启动盘：/dev/%s。\n' "$BOOT_MEDIUM" "$BOOT_DISK"
+    else
+        BOOT_DISK=""
+        echo '信息：无法预先识别启动介质，将由 sysupgrade 检查并确定当前启动盘。'
+    fi
+    echo '信息：升级当前启动盘；SD 卡和 eMMC 均支持保留配置选项。'
+}
+
+# 按标称内存的 90% 划分档位，为硬件保留内存留余量（4G 机型可能只显示 3.77 GiB）。
+select_upgrade_mode() {
+    local total_kib="$1" nominal_gib=2
+    [[ "$USE_DOCKER" == true ]] && nominal_gib=4
+    UPGRADE_MODE=compressed
+    if [[ "$total_kib" =~ ^[1-9][0-9]{0,11}$ ]] &&
+        ((total_kib >= nominal_gib * 1024 * 1024 * 90 / 100)); then
+        UPGRADE_MODE=extracted
+        printf '信息：达到 %sG 内存档位，采用原方案：先解压为 .img，再升级。\n' "$nominal_gib"
+    else
+        printf '信息：未达到 %sG 内存档位，使用 .img.gz 流式升级，不生成完整 .img 文件。\n' "$nominal_gib"
+    fi
+}
+
+# 按实际剩余资源检查；不把 tmpfs 挂载上限当作物理内存。
+check_available_resources() {
+    local additional_kib="$1" phase="$2" available_kib filesystem memory_kib required_kib
+    available_kib=$(df -Pk "$TMP_DIR" 2>/dev/null | awk 'END {print $4}') || return 1
+    filesystem=$(df -PT "$TMP_DIR" 2>/dev/null | awk 'END {print $2}') || return 1
+    memory_kib=$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo) || return 1
+    if [[ ! "$available_kib" =~ ^[0-9]+$ || ! "$memory_kib" =~ ^[0-9]+$ || -z "$filesystem" ]]; then
+        echo '错误：无法读取实际可用空间或 MemAvailable，停止升级。' >&2
+        return 1
+    fi
+    required_kib=$((additional_kib + WORK_RESERVE_KIB))
+    if ((available_kib < required_kib)); then
+        printf '错误：%s需要至少 %s KiB 临时空间（含工作余量），当前仅 %s KiB。不会自动清除配置。\n' \
+            "$phase" "$required_kib" "$available_kib" >&2
+        return 1
+    fi
+    # tmpfs/ramfs 的文件会占用内存；扩大挂载上限不会增加物理内存。
+    if [[ "$filesystem" != tmpfs && "$filesystem" != ramfs ]]; then
+        required_kib=$WORK_RESERVE_KIB
+    fi
+    if ((memory_kib < required_kib)); then
+        printf '错误：%s需要至少 %s KiB 可用内存（含工作余量），当前仅 %s KiB。请释放内存后重试。\n' \
+            "$phase" "$required_kib" "$memory_kib" >&2
+        return 1
+    fi
+    printf '信息：%s资源检查通过，临时空间 %s KiB，可用内存 %s KiB。\n' "$phase" "$available_kib" "$memory_kib"
+}
+
+check_download_resources() {
+    local size_bytes
+    size_bytes=$(jq -r --arg name "$IMAGE_FILENAME_GZ" \
+        '[.assets[] | select(.name == $name)] | if length == 1 then .[0].size else null end' \
+        <<< "$RELEASE_INFO") || return 1
+    if [[ ! "$size_bytes" =~ ^[1-9][0-9]{0,11}$ ]]; then
+        echo '错误：Release 未提供有效的压缩固件大小，无法检查下载空间。' >&2
+        return 1
+    fi
+    check_available_resources "$(((size_bytes + 1023) / 1024))" '下载压缩固件'
+}
+
+validate_compressed_image() {
+    local status=0
+    [[ -s "$IMAGE_PATH_GZ" ]] || { echo '错误：压缩固件不存在或为空。' >&2; return 1; }
+    # 只检查压缩流和 CRC，不生成 .img；保留尾部的 fwtool 元数据。
+    gunzip -t "$IMAGE_PATH_GZ" || status=$?
+    case "$status" in
+        0) ;;
+        2) echo '信息：压缩流检查完成，检测到尾部附加数据；继续由 sysupgrade 检查镜像元数据。' ;;
+        *) printf '错误：压缩固件检查失败（退出码 %s），停止升级。\n' "$status" >&2; return 1 ;;
+    esac
+}
+
+stream_image() {
+    local status=0
+    gunzip -c "$IMAGE_PATH_GZ" || status=$?
+    # 与原解压方案一致：允许 fwtool 尾部数据引起的警告，不忽略真正的解压错误。
+    [[ "$status" == 0 || "$status" == 2 ]]
+}
+
+prepare_upgrade_image() {
+    local image_bytes
+    check_available_resources 0 '检查压缩镜像' || return 1
+    if [[ "$UPGRADE_MODE" == compressed ]]; then
+        validate_compressed_image || return 1
+        KEEP_IMAGE=1
+        IMAGE_PATH="$IMAGE_PATH_GZ"
+        echo '信息：将直接把 .img.gz 交给 sysupgrade，写入时流式解压。'
+        return 0
+    fi
+
+    # 流式计算实际解压大小并校验 CRC，不依赖会在 4 GiB 时回绕的 gzip ISIZE。
+    echo '信息：正在检查压缩流并计算解压大小，不生成临时解压镜像...'
+    image_bytes=$(set -o pipefail; stream_image | wc -c) || {
+        echo '错误：压缩固件检查失败，停止升级。' >&2
+        return 1
+    }
+    image_bytes=${image_bytes//[[:space:]]/}
+    [[ "$image_bytes" =~ ^[1-9][0-9]{0,11}$ ]] || {
+        echo '错误：解压后的镜像大小无效，停止升级。' >&2
+        return 1
+    }
+    KEEP_IMAGE=1
+    check_available_resources "$(((image_bytes + 1023) / 1024))" '解压固件' || return 1
+    printf '信息：正在解压固件，解压后约 %s MiB...\n' "$(((image_bytes + 1048575) / 1048576))"
+    stream_image > "$IMAGE_PATH_IMG.part" || {
+        echo '错误：解压固件失败，保留压缩镜像并停止升级。' >&2
+        return 1
+    }
+    [[ -s "$IMAGE_PATH_IMG.part" ]] || return 1
+    mv -- "$IMAGE_PATH_IMG.part" "$IMAGE_PATH_IMG" || return 1
+    IMAGE_PATH="$IMAGE_PATH_IMG"
+    rm -f -- "$IMAGE_PATH_GZ"
+    echo '信息：固件解压完成，将使用 .img 升级。'
+}
+
+check_upgrade_resources() {
+    local backup_bytes=0 extra_kib=0
+    check_available_resources 0 '准备升级' || return 1
+    if [[ -z "$SYSUPGRADE_ARGS" ]]; then
+        # 流式测量实际配置备份，不先在内存文件系统中生成一份大归档。
+        backup_bytes=$(set -o pipefail; sysupgrade -b - | wc -c) || {
+            echo '错误：配置备份预检查失败，停止升级；不会改为不保留配置。' >&2
+            return 1
+        }
+        backup_bytes=${backup_bytes//[[:space:]]/}
+        if [[ ! "$backup_bytes" =~ ^[1-9][0-9]{0,11}$ ]]; then
+            echo '错误：配置备份为空或大小无效，停止升级。' >&2
+            return 1
+        fi
+        # 为备份及复制缓冲留两倍归档空间；正式备份仍由 sysupgrade 创建。
+        extra_kib=$((2 * ((backup_bytes + 1023) / 1024)))
+        printf '信息：配置备份约 %s KiB，将保留配置升级。\n' "$(((backup_bytes + 1023) / 1024))"
+    fi
+    check_available_resources "$extra_kib" '固件升级'
+}
+
+check_upgrade_image() {
+    echo '信息：正在执行镜像预检查（sysupgrade -T），不会刷写设备。'
+    sysupgrade -T ${FORCE_FLAG:+"$FORCE_FLAG"} ${VERBOSE_FLAG:+"$VERBOSE_FLAG"} \
+        ${SYSUPGRADE_ARGS:+"$SYSUPGRADE_ARGS"} "$IMAGE_PATH"
+}
+
 # --- 退出脚本时清理本次任务的临时文件 ---
 cleanup() {
     local file
-    for file in "${IMAGE_PATH_GZ:-}" "${CHECKSUM_PATH:-}"; do
-        if [[ -n "$file" ]]; then rm -f -- "$file" "$file.part" "$file.part.aria2"; fi
+    for file in "${IMAGE_PATH_GZ:-}" "${IMAGE_PATH_IMG:-}" "${CHECKSUM_PATH:-}"; do
+        if [[ -n "$file" ]]; then
+            if [[ ${KEEP_IMAGE:-0} != 1 ||
+                ( "$file" != "${IMAGE_PATH_GZ:-}" && "$file" != "${IMAGE_PATH:-}" ) ]]; then
+                rm -f -- "$file"
+            fi
+            rm -f -- "$file.part" "$file.part.aria2"
+        fi
     done
     rm -f -- "$TMP_DIR/release-api.json" "$TMP_DIR/release-api.json.part"
-    # 保留已解压的镜像，延续取消后可手动升级的行为。
+    # 保留检查通过的镜像，取消或失败后可手动升级。
     rmdir -- "$TMP_DIR" 2>/dev/null || true
 }
 
@@ -454,7 +627,6 @@ fi
 TMP_DIR=$(mktemp -d /tmp/openwrt-upgrade.XXXXXX) || exit 1
 if [[ -n ${IMAGE_FILENAME_GZ:-} ]]; then
     IMAGE_PATH_GZ="$TMP_DIR/$IMAGE_FILENAME_GZ"
-    IMAGE_PATH_IMG="$TMP_DIR/$IMAGE_FILENAME_IMG"
     CHECKSUM_PATH="$TMP_DIR/$CHECKSUM_FILENAME"
 fi
 trap cleanup EXIT
@@ -495,26 +667,15 @@ echo -e "${C_BLUE}--- 步骤 2: 显示系统信息并检查内存 ---${C_RESET}"
 echo -e "${C_BLUE}信息：${C_RESET}正在收集当前系统信息..."
 echo
 
-# --- 内存检查 (必须 >= 1GiB) ---
+# 总内存用于选择升级方案，实际可用内存用于后续资源检查。
 echo -e "${C_CYAN}>> 内存检查:${C_RESET}"
-mem_total_kib=$(grep '^MemTotal:' /proc/meminfo | awk '{print $2}')
-
-if [ -z "$mem_total_kib" ]; then
-    echo -e "  ${C_YELLOW}警告：无法读取总内存大小，跳过内存检查。${C_RESET}"
-elif [ "$mem_total_kib" -lt "$MEM_THRESHOLD_KIB" ]; then
-    mem_total_mib=$(awk -v total_kib="$mem_total_kib" 'BEGIN { printf "%.0f", total_kib/1024 }')
-    echo -e "  ${C_B_RED}错误：系统总内存 (${mem_total_mib} MiB) 低于运行此脚本所需的最低要求 (1024 MiB)。${C_RESET}" >&2
-    echo -e "        为避免下载或解压失败，脚本将退出。" >&2
-    exit 1
-else
-    mem_total_mib=$(awk -v total_kib="$mem_total_kib" 'BEGIN { printf "%.0f", total_kib/1024 }')
-    echo -e "  ${C_GREEN}内存检查通过 (总计: ${mem_total_mib} MiB)。${C_RESET}"
-fi
+mem_total_kib=$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo)
+echo '信息：稍后按固件类型和内存档位选择先解压或压缩镜像升级。'
 echo
 
 # --- 显示简化内存信息 ---
 echo -e "${C_CYAN}>> 内存信息 (当前):${C_RESET}"
-mem_avail_kib=$(grep '^MemAvailable:' /proc/meminfo | awk '{print $2}')
+mem_avail_kib=$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo)
 
 if [ -n "$mem_total_kib" ]; then
     if [ -n "$mem_avail_kib" ]; then
@@ -557,6 +718,7 @@ echo
 # 磁盘分区和挂载点信息 (lsblk)
 echo -e "${C_CYAN}>> 磁盘分区布局 (lsblk):${C_RESET}"
 lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT 2>/dev/null | sed 's/^/  /' || echo -e "  ${C_YELLOW}警告：${C_RESET}'lsblk' 命令执行失败或未安装。"
+detect_boot_medium
 echo
 
 # 文件系统使用情况和类型 (df)
@@ -652,10 +814,10 @@ else
     FIRMWARE_TYPE_STR="标准版固件"
 fi
 
-IMAGE_FILENAME_IMG="${IMAGE_FILENAME_GZ%.gz}"
 IMAGE_PATH_GZ="$TMP_DIR/$IMAGE_FILENAME_GZ"
-IMAGE_PATH_IMG="$TMP_DIR/$IMAGE_FILENAME_IMG"
+IMAGE_PATH_IMG="${IMAGE_PATH_GZ%.gz}"
 CHECKSUM_PATH="$TMP_DIR/$CHECKSUM_FILENAME"
+select_upgrade_mode "$mem_total_kib"
 
 echo
 echo -e "${C_CYAN}┌──────────────────────────┬────────────────────────────────────────────┐${C_RESET}"
@@ -690,7 +852,7 @@ echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━�
 echo -e "${C_B_YELLOW}[*] /tmp 分区扩容选项${C_RESET}"
 echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
 echo -e "  ${C_BLUE}提示：${C_RESET}可以临时将 /tmp 分区扩大到 RAM 的 100%"
-echo -e "  ${C_GREEN}• 有助于存储下载和解压的固件文件${C_RESET}"
+echo -e "  ${C_GREEN}• 有助于存储固件、解压镜像及升级配置备份${C_RESET}"
 echo -e "  ${C_YELLOW}• 此更改仅在本次运行期间有效，重启后失效${C_RESET}"
 echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
 echo -e "\n${C_BLUE}信息：${C_RESET}/tmp 当前大小:"
@@ -774,6 +936,7 @@ echo
 # --- 7. 下载文件 ---
 echo -e "${C_BLUE}--- 步骤 7: 下载文件 ---${C_RESET}"
 echo -e "${C_BLUE}信息：${C_RESET}正在下载压缩固件 '${C_CYAN}${IMAGE_FILENAME_GZ}${C_RESET}' 到 '${C_CYAN}${IMAGE_PATH_GZ}${C_RESET}' ..."
+check_download_resources || exit 1
 download_file "${GITHUB_PROXY}${IMAGE_URL}" "$IMAGE_PATH_GZ" 1800 1 || exit 1
 echo -e "${C_B_GREEN}信息：${C_RESET}压缩固件下载完成。"
 
@@ -843,86 +1006,42 @@ rm -f "$CHECKSUM_PATH" # 清理校验文件
 echo -e "${C_BLUE}--- 步骤 8 完成 ---${C_RESET}"
 echo
 
-# --- 9. 解压固件 ---
-echo -e "${C_BLUE}--- 步骤 9: 解压固件 ---${C_RESET}"
-echo -e "${C_BLUE}信息：${C_RESET}正在解压固件 '${C_CYAN}${IMAGE_PATH_GZ}${C_RESET}' ..."
-
-# 临时禁用 set -e 以防止解压警告或非致命错误导致脚本退出
-set +e
-# 使用 -f 强制解压，覆盖可能存在的同名文件
-gunzip -f "$IMAGE_PATH_GZ"
-decomp_status=$?
-set -e
-
-# gzip/gunzip 退出码 2 通常表示警告（如 trailing garbage），但也可能解压成功
-# 只要解压后的文件存在且不为空，我们就认为成功
-if [ $decomp_status -ne 0 ] && [ $decomp_status -ne 2 ]; then
-    echo -e "${C_B_RED}错误：${C_RESET}解压命令执行失败 (退出码 $decomp_status)。" >&2
-    exit 1
-elif [ $decomp_status -eq 2 ]; then
-    echo -e "${C_YELLOW}警告：${C_RESET}解压过程中有警告 (退出码 2，通常是忽略了尾部垃圾数据)，继续下一步。"
-fi
-
-if [ ! -s "$IMAGE_PATH_IMG" ]; then 
-    echo -e "${C_B_RED}错误：${C_RESET}解压后未找到文件或文件为空 '${C_RED}${IMAGE_PATH_IMG}${C_RESET}'。" >&2; 
-    exit 1; 
-fi
-
-echo -e "${C_B_GREEN}信息：${C_RESET}固件解压完成。解压后文件: '${C_CYAN}${IMAGE_PATH_IMG}${C_RESET}'"
-# 使用 || true 防止 ls 命令失败（如不支持 -h 参数）导致脚本退出
-ls -lh "$IMAGE_PATH_IMG" 2>/dev/null || ls -l "$IMAGE_PATH_IMG" || true
-
+# --- 9. 根据内存档位准备镜像 ---
+echo -e "${C_BLUE}--- 步骤 9: 检查并准备升级镜像 ---${C_RESET}"
+prepare_upgrade_image || exit 1
+ls -lh "$IMAGE_PATH" 2>/dev/null || ls -l "$IMAGE_PATH" || true
 echo -e "${C_BLUE}--- 步骤 9 完成 ---${C_RESET}"
 echo
 
 # --- 10. 检查空间并确定升级选项 ---
 echo -e "${C_BLUE}--- 步骤 10: 检查空间并确定升级选项 ---${C_RESET}"
-echo -e "${C_BLUE}信息：${C_RESET}正在检查 /tmp 可用空间以确定升级选项..."
-
-# 临时禁用 set -e 防止 df 失败导致退出
-set +e
-AVAILABLE_KIB=$(df -k /tmp 2>/dev/null | awk 'NR==2 {print $4}')
-set -e
-
+echo '信息：按实际配置备份大小检查资源，空间不足时停止，不自动清除配置。'
 SYSUPGRADE_ARGS=""
-KEEP_DATA_ALLOWED=1
-
-if [ -z "$AVAILABLE_KIB" ] || ! [[ "$AVAILABLE_KIB" =~ ^[0-9]+$ ]]; then
-    echo -e "${C_YELLOW}警告：${C_RESET}无法准确获取 /tmp 可用空间。将允许用户选择是否保留配置。"
-    KEEP_DATA_ALLOWED=1
-elif [ "$AVAILABLE_KIB" -lt "$THRESHOLD_KIB" ]; then
-    echo -e "${C_YELLOW}警告：${C_RESET}/tmp 可用空间 (${C_YELLOW}${AVAILABLE_KIB}${C_RESET} KiB) 低于所需阈值 (${C_YELLOW}${THRESHOLD_KIB}${C_RESET} KiB)。"
-    echo -e "      将强制【${C_B_YELLOW}不保留配置${C_RESET}】数据进行升级 (使用 -n 选项)。"
-    SYSUPGRADE_ARGS="-n"; KEEP_DATA_ALLOWED=0;
+echo
+echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
+echo -e "${C_B_YELLOW}[+] 配置数据保留选项${C_RESET}"
+echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
+echo -e "  ${C_BLUE}提示：${C_RESET}您可以选择在升级时保留或清除配置数据"
+echo -e "  ${C_GREEN}• 保留配置${C_RESET} - 升级后保留当前系统设置"
+echo -e "  ${C_YELLOW}• 清除配置${C_RESET} - 升级后恢复为出厂设置"
+echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
+read_input "$(echo -e "\n${C_YELLOW}❓ 是否保留配置数据？(Y/n) [默认: ${C_B_GREEN}是${C_RESET}${C_YELLOW}]: ${C_RESET}")" confirm_keep_data
+confirm_keep_data=${confirm_keep_data:-Y}  # 默认为Y
+if [[ "$confirm_keep_data" =~ ^[Nn]$ ]]; then
+    echo -e "${C_BLUE}信息：${C_RESET}用户选择【${C_YELLOW}不保留${C_RESET}】配置数据进行升级。"
+    SYSUPGRADE_ARGS="-n"
 else
-    echo -e "${C_GREEN}信息：${C_RESET}/tmp 可用空间 (${C_GREEN}${AVAILABLE_KIB}${C_RESET} KiB) 充足。"
-    KEEP_DATA_ALLOWED=1
+    echo -e "${C_BLUE}信息：${C_RESET}将尝试【${C_GREEN}保留${C_RESET}】配置数据进行升级。"
+    SYSUPGRADE_ARGS=""
 fi
-
-if [ "$KEEP_DATA_ALLOWED" -eq 1 ]; then
-    echo
-    echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
-    echo -e "${C_B_YELLOW}[+] 配置数据保留选项${C_RESET}"
-    echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
-    echo -e "  ${C_BLUE}提示：${C_RESET}您可以选择在升级时保留或清除配置数据"
-    echo -e "  ${C_GREEN}• 保留配置${C_RESET} - 升级后保留当前系统设置"
-    echo -e "  ${C_YELLOW}• 清除配置${C_RESET} - 升级后恢复为出厂设置"
-    echo -e "${C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
-    read_input "$(echo -e "\n${C_YELLOW}❓ 是否保留配置数据？(Y/n) [默认: ${C_B_GREEN}是${C_RESET}${C_YELLOW}]: ${C_RESET}")" confirm_keep_data
-    confirm_keep_data=${confirm_keep_data:-Y}  # 默认为Y
-    if [[ "$confirm_keep_data" =~ ^[Nn]$ ]]; then
-        echo -e "${C_BLUE}信息：${C_RESET}用户选择【${C_YELLOW}不保留${C_RESET}】配置数据进行升级。"
-        SYSUPGRADE_ARGS="-n"
-    else
-        echo -e "${C_BLUE}信息：${C_RESET}将尝试【${C_GREEN}保留${C_RESET}】配置数据进行升级。"
-        SYSUPGRADE_ARGS=""
-    fi
-fi
+check_upgrade_resources || exit 1
 echo -e "${C_BLUE}--- 步骤 10 完成 ---${C_RESET}"
 echo
 
 # --- 11. 询问可选参数并最终确认 ---
 echo -e "${C_BLUE}--- 步骤 11: 配置可选参数并最终确认 ---${C_RESET}"
+printf '信息：当前启动介质：%s；启动盘：%s%s（由 sysupgrade 识别升级目标）。\n' \
+    "$BOOT_MEDIUM" "${BOOT_DISK:+/dev/}" "${BOOT_DISK:-未识别}"
 # 这些变量在后面构建表格时使用，此处不再需要预先构建UPGRADE_INFO字符串
 
 # --- 询问是否强制升级 (-F) ---
@@ -990,7 +1109,7 @@ fi
 echo -e "${C_CYAN}┌──────────────────────────┬────────────────────────────────────────────┐${C_RESET}"
 echo -e "${C_CYAN}│${C_RESET} ${C_B_BLUE}项目${C_RESET}                     ${C_CYAN}│${C_RESET} ${C_B_BLUE}详情${C_RESET}                                   ${C_CYAN}│${C_RESET}"
 echo -e "${C_CYAN}╞══════════════════════════╪════════════════════════════════════════════╡${C_RESET}"
-printf "${C_CYAN}│${C_RESET} ${C_CYAN}[>]${C_RESET} %-20s ${C_CYAN}│${C_RESET} %-42s ${C_CYAN}│${C_RESET}\\n" "固件文件" "$(basename "$IMAGE_PATH_IMG")"
+printf "${C_CYAN}│${C_RESET} ${C_CYAN}[>]${C_RESET} %-20s ${C_CYAN}│${C_RESET} %-42s ${C_CYAN}│${C_RESET}\\n" "固件文件" "$(basename "$IMAGE_PATH")"
 echo -e "${C_CYAN}├──────────────────────────┼────────────────────────────────────────────┤${C_RESET}"
 printf "${C_CYAN}│${C_RESET} ${C_CYAN}[#]${C_RESET} %-20s ${C_CYAN}│${C_RESET} " "版本标签"
 echo -e "${C_GREEN}${RELEASE_TAG}${C_RESET}$(printf '%*s' $((42 - ${#RELEASE_TAG})) '') ${C_CYAN}│${C_RESET}"
@@ -1048,20 +1167,22 @@ if [[ "$confirm_upgrade" =~ ^[Yy]$ ]]; then
     if [ -n "$FLAG_DESC" ]; then MSG_DESC="${MSG_DESC}${FLAG_DESC}, ${DATA_DESC})..."; else MSG_DESC="${MSG_DESC}${DATA_DESC})..."; fi
     echo -e "$MSG_DESC"
 
-    # 执行命令
-    
+    # 临近执行时再次检查资源；不自动修改保留配置选项。
+    check_upgrade_resources || exit 1
     if [ -n "$FORCE_FLAG" ]; then
+        check_upgrade_image || exit 1
         # 如果启用了强制升级，使用 exec 直接替换进程，防止 SSH 断开后的误报错误
         echo -e "${C_B_GREEN}✅ 信息：sysupgrade 命令已启动。SSH 连接即将断开，设备将重启。${C_RESET}"
         echo
-        exec sysupgrade ${FORCE_FLAG:+"$FORCE_FLAG"} ${VERBOSE_FLAG:+"$VERBOSE_FLAG"} ${SYSUPGRADE_ARGS:+"$SYSUPGRADE_ARGS"} "$IMAGE_PATH_IMG"
+        exec sysupgrade ${FORCE_FLAG:+"$FORCE_FLAG"} ${VERBOSE_FLAG:+"$VERBOSE_FLAG"} ${SYSUPGRADE_ARGS:+"$SYSUPGRADE_ARGS"} "$IMAGE_PATH"
     else
         # 未启用强制升级，使用常规调用以捕获潜在的校验错误
-        # 临时禁用 strict error checking
-        set +e
-        sysupgrade ${FORCE_FLAG:+"$FORCE_FLAG"} ${VERBOSE_FLAG:+"$VERBOSE_FLAG"} ${SYSUPGRADE_ARGS:+"$SYSUPGRADE_ARGS"} "$IMAGE_PATH_IMG"
-        sysupgrade_status=$?
-        set -e
+        sysupgrade_status=0
+        if check_upgrade_image; then
+            sysupgrade ${FORCE_FLAG:+"$FORCE_FLAG"} ${VERBOSE_FLAG:+"$VERBOSE_FLAG"} ${SYSUPGRADE_ARGS:+"$SYSUPGRADE_ARGS"} "$IMAGE_PATH" || sysupgrade_status=$?
+        else
+            sysupgrade_status=$?
+        fi
 
         if [ $sysupgrade_status -eq 0 ]; then
             echo # 换行
@@ -1069,7 +1190,7 @@ if [[ "$confirm_upgrade" =~ ^[Yy]$ ]]; then
             exit 0
         else
             echo
-            echo -e "${C_B_RED}❌ 错误：sysupgrade 命令执行失败 (退出码 $sysupgrade_status)。${C_RESET}"
+            echo -e "${C_B_RED}❌ 错误：sysupgrade 预检查或执行失败 (退出码 $sysupgrade_status)。${C_RESET}"
             
             # 如果之前没用过 -F，询问是否尝试强制升级
             if [[ "$FORCE_FLAG" != "-F" ]]; then
@@ -1082,12 +1203,13 @@ if [[ "$confirm_upgrade" =~ ^[Yy]$ ]]; then
                 if [[ "$retry_force" =~ ^[Yy]$ ]]; then
                     echo -e "${C_BLUE}信息：${C_RESET}正在尝试使用强制升级选项 (-F) 重试..."
                     FORCE_FLAG="-F"
-                    
+                    check_upgrade_resources || exit 1
+                    check_upgrade_image || exit 1
                     echo -e "${C_B_GREEN}✅ 信息：正在执行强制升级命令。连接即将断开，请等待设备重启...${C_RESET}"
                     echo
                     
                     # 使用 exec 替换当前 shell 进程
-                    exec sysupgrade ${FORCE_FLAG:+"$FORCE_FLAG"} ${VERBOSE_FLAG:+"$VERBOSE_FLAG"} ${SYSUPGRADE_ARGS:+"$SYSUPGRADE_ARGS"} "$IMAGE_PATH_IMG"
+                    exec sysupgrade ${FORCE_FLAG:+"$FORCE_FLAG"} ${VERBOSE_FLAG:+"$VERBOSE_FLAG"} ${SYSUPGRADE_ARGS:+"$SYSUPGRADE_ARGS"} "$IMAGE_PATH"
                 else
                     echo -e "${C_YELLOW}信息：用户选择不重试。脚本退出。${C_RESET}"
                     exit 1
@@ -1099,7 +1221,7 @@ if [[ "$confirm_upgrade" =~ ^[Yy]$ ]]; then
     fi
 else
     echo # 换行
-    echo -e "${C_YELLOW}操作已取消。${C_RESET}解压后的固件文件保留在 '${C_CYAN}${IMAGE_PATH_IMG}${C_RESET}'，您可以手动升级或删除它。"
+    echo -e "${C_YELLOW}操作已取消。${C_RESET}固件文件保留在 '${C_CYAN}${IMAGE_PATH}${C_RESET}'，您可以手动升级或删除它。"
     exit 0
 fi
 
