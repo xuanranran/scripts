@@ -41,7 +41,7 @@ BOOT_MEDIUM="未识别"
 GITHUB_PROXY=""  # GitHub 代理前缀
 
 # 两个平台脚本保持独立，以下通用函数应同步维护。
-# 独立标题框与留白选项框；信息汇总使用表格，统一按终端显示宽度折行。
+# 独立标题框与留白选项框；不足 60 列时信息汇总改为单列，宽屏样式保持不变。
 UI_OPEN=0
 UI_TITLE=""
 UI_ROWS=()
@@ -84,7 +84,7 @@ ui_end() {
         fi
     fi
     [[ "$columns" =~ ^[1-9][0-9]{0,3}$ ]] || columns=80
-    ((columns >= 40)) || columns=40
+    ((columns >= 20)) || columns=20
     ((columns <= 100)) || columns=100
     local border title_color reset green blue yellow
     printf -v border '%b' "$C_CYAN"
@@ -168,6 +168,7 @@ ui_end() {
             title_color = ENVIRON["UI_TABLE_TITLE_COLOR"]; green = ENVIRON["UI_TABLE_GREEN"]
             blue = ENVIRON["UI_TABLE_BLUE"]; yellow = ENVIRON["UI_TABLE_YELLOW"]
             menu = ENVIRON["UI_TABLE_MENU"] == "1"
+            compact = width < 58
             left = 10; right = width - left - 7
             print ""; fullrule("╔", "═", "╗")
             n = splitcell(ENVIRON["UI_TABLE_TITLE"], width - 4, title)
@@ -175,7 +176,9 @@ ui_end() {
             fullrule("╚", "═", "╝")
             if (ENVIRON["UI_TABLE_COUNT"] > 0) {
                 print ""
-                if (menu) {
+                if (compact) {
+                    fullrule("┌", "─", "┐")
+                } else if (menu) {
                     heading = "选择操作"
                     if (index(ENVIRON["UI_TABLE_TITLE"], "GitHub")) heading = "选择下载方式"
                     else if (ENVIRON["UI_TABLE_TITLE"] == "固件类型选择") heading = "选择固件类型"
@@ -194,20 +197,29 @@ ui_end() {
                 if (kind == "option") {
                     if (NR > 1) fullrow("", reset, 0)
                     style = index(value, "默认") || index(value, "推荐") ? green : blue
-                    fullrow(label ") " value, style, 1)
+                    hint = compact ? index(value, "（默认") : 0
+                    if (compact && !hint) hint = index(value, "（推荐")
+                    if (hint) {
+                        fullrow(label ") " substr(value, 1, hint - 1), style, 0)
+                        fullrow(substr(value, hint), style, 2)
+                    } else fullrow(label ") " value, style, compact ? 0 : 1)
                     seen_option = 1
                 } else if (label == "说明" && seen_option) {
-                    fullrow("• " value, reset, 4)
+                    fullrow("• " value, reset, compact ? 2 : 4)
                 } else {
-                    fullrow(label "：" value, label == "注意" ? yellow : reset, 1)
+                    fullrow(label "：" value, label == "注意" ? yellow : reset, compact ? 0 : 1)
                 }
+            } else if (compact) {
+                if (NR > 1) fullrow("", reset, 0)
+                fullrow(label "：", reset, 0)
+                fullrow(value, label == "注意" ? yellow : reset, 1)
             } else {
                 if (NR > 1) rule("├", "┼", "┤")
                 row(label, value)
             }
         }
         END {
-            if (NR && menu) { fullrow("", reset, 0); fullrule("└", "─", "┘") }
+            if (NR && (menu || compact)) { fullrow("", reset, 0); fullrule("└", "─", "┘") }
             else if (NR) rule("└", "┴", "┘")
         }
     '
