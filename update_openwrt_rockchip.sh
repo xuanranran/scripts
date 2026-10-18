@@ -822,6 +822,11 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# 首次绘制前刷新 Bash 的终端列数，兼容没有 stty 的 OpenWrt。
+# 外部命令在主流程执行，避免首个标题先用默认宽度绘制。
+if [[ -t 1 ]]; then shopt -s checkwinsize; fi
+command -p uname >/dev/null 2>&1 || true
+
 echo "信息：本次任务的临时目录为 $TMP_DIR"
 
 echo
