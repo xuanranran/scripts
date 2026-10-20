@@ -251,8 +251,10 @@ ui_prompt() {
 
 read_input() {
     ui_end
+    local input_prompt
+    printf -v input_prompt '%b❓ %s%b' "$C_YELLOW" "$1" "$C_RESET"
     # EOF 不应当被当成回车，从而意外接受升级默认值。
-    if ! IFS= read -r -p "$1" "$2"; then
+    if ! IFS= read -r -p "$input_prompt" "$2"; then
         printf '\n❌ 输入已关闭，操作中止。\n' >&2
         exit 1
     fi
@@ -581,6 +583,17 @@ select_upgrade_mode() {
     fi
 }
 
+# 大小提示统一使用 KiB / MiB；内部资源计算仍使用 KiB。
+format_kib() {
+    local size_kib="$1" fraction
+    if ((size_kib < 1024)); then
+        printf '%s KiB' "$size_kib"
+    else
+        fraction=$(((size_kib % 1024 * 100 + 512) / 1024))
+        printf '%d.%02d MiB' "$((size_kib / 1024 + fraction / 100))" "$((fraction % 100))"
+    fi
+}
+
 # 按实际剩余资源检查；不把 tmpfs 挂载上限当作物理内存。
 check_available_resources() {
     local additional_kib="$1" phase="$2" available_kib filesystem memory_kib required_kib
@@ -593,8 +606,8 @@ check_available_resources() {
     fi
     required_kib=$((additional_kib + WORK_RESERVE_KIB))
     if ((available_kib < required_kib)); then
-        printf '❌ 错误：%s需要至少 %s KiB 临时空间（含工作余量），当前仅 %s KiB。不会自动清除配置。\n' \
-            "$phase" "$required_kib" "$available_kib" >&2
+        printf '❌ 错误：%s需要至少 %s 临时空间（含工作余量），当前仅 %s。不会自动清除配置。\n' \
+            "$phase" "$(format_kib "$required_kib")" "$(format_kib "$available_kib")" >&2
         return 1
     fi
     # tmpfs/ramfs 的文件会占用内存；扩大挂载上限不会增加物理内存。
@@ -602,11 +615,12 @@ check_available_resources() {
         required_kib=$WORK_RESERVE_KIB
     fi
     if ((memory_kib < required_kib)); then
-        printf '❌ 错误：%s需要至少 %s KiB 可用内存（含工作余量），当前仅 %s KiB。请释放内存后重试。\n' \
-            "$phase" "$required_kib" "$memory_kib" >&2
+        printf '❌ 错误：%s需要至少 %s 可用内存（含工作余量），当前仅 %s。请释放内存后重试。\n' \
+            "$phase" "$(format_kib "$required_kib")" "$(format_kib "$memory_kib")" >&2
         return 1
     fi
-    printf '✅ 信息：%s资源检查通过，临时空间 %s KiB，可用内存 %s KiB。\n' "$phase" "$available_kib" "$memory_kib"
+    printf '✅ 信息：%s资源检查通过，临时空间 %s，可用内存 %s。\n' \
+        "$phase" "$(format_kib "$available_kib")" "$(format_kib "$memory_kib")"
 }
 
 check_download_resources() {
@@ -664,7 +678,7 @@ prepare_upgrade_image() {
     }
     KEEP_IMAGE=1
     check_available_resources "$(((image_bytes + 1023) / 1024))" '解压固件' || return 1
-    printf '信息：正在解压固件，解压后约 %s MiB...\n' "$(((image_bytes + 1048575) / 1048576))"
+    printf '信息：正在解压固件，解压后约 %s...\n' "$(format_kib "$(((image_bytes + 1023) / 1024))")"
     stream_image > "$IMAGE_PATH_IMG.part" || {
         echo '❌ 错误：解压固件失败，保留压缩镜像并停止升级。' >&2
         return 1
@@ -687,7 +701,7 @@ check_upgrade_resources() {
         else
             check_available_resources 0 '准备升级' || return 1
             # 流式测量实际配置备份，不先在内存文件系统中生成一份大归档。
-            echo '信息：正在打包配置并检查备份大小，配置较多时可能需要几秒，请稍候...'
+            echo '信息：正在打包配置并检查备份大小，请稍候（耗时取决于配置大小和设备性能）...'
             backup_started=$SECONDS
             backup_bytes=$(set -o pipefail; sysupgrade -b - | wc -c) || {
                 echo '❌ 错误：配置备份预检查失败，停止升级；不会改为不保留配置。' >&2
@@ -700,8 +714,8 @@ check_upgrade_resources() {
             fi
             CONFIG_BACKUP_BYTES=$backup_bytes
             CONFIG_BACKUP_CHECKED_AT=$SECONDS
-            printf '✅ 信息：配置备份约 %s KiB，检查耗时 %s 秒，将保留配置升级。\n' \
-                "$(((backup_bytes + 1023) / 1024))" "$((SECONDS - backup_started))"
+            printf '✅ 信息：配置备份约 %s，检查耗时 %s 秒，将保留配置升级。\n' \
+                "$(format_kib "$(((backup_bytes + 1023) / 1024))")" "$((SECONDS - backup_started))"
         fi
         # 为备份及复制缓冲留两倍归档空间；正式备份仍由 sysupgrade 创建。
         extra_kib=$((2 * ((backup_bytes + 1023) / 1024)))
