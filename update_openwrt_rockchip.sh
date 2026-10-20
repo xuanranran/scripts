@@ -5,7 +5,7 @@ if [ -z "${BASH_VERSION:-}" ]; then
     if command -v bash >/dev/null 2>&1; then
         exec bash "$0" "$@"
     fi
-    echo "错误：请先安装 Bash，再运行此脚本。" >&2
+    echo "❌ 错误：请先安装 Bash，再运行此脚本。" >&2
     exit 1
 fi
 
@@ -25,6 +25,8 @@ REPO="xuanranran/OpenWrt_RockChip"                                        # 目�
 # 注意：固件文件名将根据机型和Docker选择动态生成
 TMP_DIR="/tmp"                                                             # 临时文件目录
 WORK_RESERVE_KIB=65536                                                    # 为升级环境和解压缓冲预留 64 MiB
+CONFIG_BACKUP_BYTES=0                                                    # 短时间内复用备份大小，避免重复打包
+CONFIG_BACKUP_CHECKED_AT=-1
 KEEP_IMAGE=0                                                             # 完成压缩流检查后，取消/失败时保留镜像
 UPGRADE_MODE=compressed                                                  # compressed 或 extracted
 
@@ -258,7 +260,7 @@ read_input() {
     ui_end
     # EOF 不应当被当成回车，从而意外接受升级默认值。
     if ! IFS= read -r -p "$1" "$2"; then
-        printf '\n输入已关闭，操作中止。\n' >&2
+        printf '\n❌ 输入已关闭，操作中止。\n' >&2
         exit 1
     fi
 }
@@ -310,7 +312,7 @@ download_file() {
                     && [[ -s "$partial" && ! -e "$partial.aria2" ]]; then
                     downloaded=1
                 else
-                    echo '分段下载失败，改用 wget/curl 重新下载...' >&2
+                    echo '❌ 分段下载失败，改用 wget/curl 重新下载...' >&2
                     # 分段文件可能包含空洞，不能交给其他工具按连续文件续传。
                     rm -f -- "$partial" "$partial.aria2" || return 1
                 fi
@@ -340,7 +342,7 @@ download_file() {
         fi
     done
     rm -f -- "$partial" "$partial.aria2"
-    printf '下载失败：%s\n' "$url" >&2
+    printf '❌ 下载失败：%s\n' "$url" >&2
     return 1
 }
 
@@ -349,7 +351,7 @@ fetch_release_json() {
     download_file "$url" "$TMP_DIR/release-api.json" 60 || return 1
     # 同时拒绝 HTML、空响应和非 JSON 响应。
     jq -e 'type == "object" or type == "array"' "$TMP_DIR/release-api.json" >/dev/null || {
-        printf 'GitHub API 返回了无效数据。\n' >&2
+        printf '❌ GitHub API 返回了无效数据。\n' >&2
         return 1
     }
     cat "$TMP_DIR/release-api.json"
@@ -359,12 +361,12 @@ select_release() {
     local latest_info history_info choices count raw_count choice index
     local page=1 page_size=10 last_page=0 tag available
     if ! latest_info=$(fetch_release_json "https://api.github.com/repos/$REPO/releases/latest"); then
-        printf '无法获取最新版本信息，请检查网络后重试。\n' >&2
+        printf '❌ 无法获取最新版本信息，请检查网络后重试。\n' >&2
         return 1
     fi
     if ! jq -e '(.tag_name | type == "string" and length > 0) and
         (.assets | type == "array")' <<< "$latest_info" >/dev/null; then
-        printf '无法读取 Release：%s\n' "$(jq -r '.message // "缺少版本标签或附件列表"' <<< "$latest_info")" >&2
+        printf '❌ 无法读取 Release：%s\n' "$(jq -r '.message // "缺少版本标签或附件列表"' <<< "$latest_info")" >&2
         return 1
     fi
     ui_section '固件版本选择'
@@ -386,11 +388,11 @@ select_release() {
     if [[ "$choice" == h || "$choice" == H ]]; then
         while true; do
             if ! history_info=$(fetch_release_json "https://api.github.com/repos/$REPO/releases?per_page=$page_size&page=$page"); then
-                printf '无法获取历史版本列表。\n' >&2
+                printf '❌ 无法获取历史版本列表。\n' >&2
                 return 1
             fi
             if ! jq -e 'type == "array"' <<< "$history_info" >/dev/null; then
-                printf '无法读取历史版本：%s\n' "$(jq -r '.message // "无效的版本列表"' <<< "$history_info")" >&2
+                printf '❌ 无法读取历史版本：%s\n' "$(jq -r '.message // "无效的版本列表"' <<< "$history_info")" >&2
                 return 1
             fi
             raw_count=$(jq 'length' <<< "$history_info")
@@ -442,7 +444,7 @@ select_release() {
         done
     fi
     RELEASE_TAG=$(jq -r '.tag_name' <<< "$RELEASE_INFO")
-    printf '已选择版本：%s\n' "$RELEASE_TAG"
+    printf '✅ 已选择版本：%s\n' "$RELEASE_TAG"
 }
 
 get_expected_checksum() {
@@ -476,7 +478,7 @@ check_dependencies() {
     if ((${#missing[@]})); then
         if command -v opkg >/dev/null 2>&1; then manager=opkg
         elif command -v apk >/dev/null 2>&1; then manager=apk
-        else echo "错误：缺少依赖 ${missing[*]}，且未找到 opkg/apk。" >&2; return 1
+        else echo "❌ 错误：缺少依赖 ${missing[*]}，且未找到 opkg/apk。" >&2; return 1
         fi
         PKG_MANAGER="$manager"
         "$manager" update || echo '警告：软件包列表更新失败，仍尝试安装。' >&2
@@ -488,7 +490,7 @@ check_dependencies() {
     fi
     for cmd in "${required[@]}"; do
         command -v "$cmd" >/dev/null 2>&1 || {
-            printf '错误：仍缺少命令 %s。\n' "$cmd" >&2
+            printf '❌ 错误：仍缺少命令 %s。\n' "$cmd" >&2
             return 1
         }
     done
@@ -612,7 +614,7 @@ detect_device_model() {
         # 这里可能还需要处理空格等其他字符
         DEVICE_MODEL="${DEVICE_MODEL// /_}"
     else
-        echo -e "${C_B_RED}错误：${C_RESET}无法检测设备型号" >&2
+        echo -e "${C_B_RED}❌ 错误：${C_RESET}无法检测设备型号" >&2
         echo -e "${C_YELLOW}提示：${C_RESET}请手动指定设备型号或检查系统信息" >&2
         return 1
     fi
@@ -675,12 +677,12 @@ check_available_resources() {
     filesystem=$(df -PT "$TMP_DIR" 2>/dev/null | awk 'END {print $2}') || return 1
     memory_kib=$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo) || return 1
     if [[ ! "$available_kib" =~ ^[0-9]+$ || ! "$memory_kib" =~ ^[0-9]+$ || -z "$filesystem" ]]; then
-        echo '错误：无法读取实际可用空间或 MemAvailable，停止升级。' >&2
+        echo '❌ 错误：无法读取实际可用空间或 MemAvailable，停止升级。' >&2
         return 1
     fi
     required_kib=$((additional_kib + WORK_RESERVE_KIB))
     if ((available_kib < required_kib)); then
-        printf '错误：%s需要至少 %s KiB 临时空间（含工作余量），当前仅 %s KiB。不会自动清除配置。\n' \
+        printf '❌ 错误：%s需要至少 %s KiB 临时空间（含工作余量），当前仅 %s KiB。不会自动清除配置。\n' \
             "$phase" "$required_kib" "$available_kib" >&2
         return 1
     fi
@@ -689,11 +691,11 @@ check_available_resources() {
         required_kib=$WORK_RESERVE_KIB
     fi
     if ((memory_kib < required_kib)); then
-        printf '错误：%s需要至少 %s KiB 可用内存（含工作余量），当前仅 %s KiB。请释放内存后重试。\n' \
+        printf '❌ 错误：%s需要至少 %s KiB 可用内存（含工作余量），当前仅 %s KiB。请释放内存后重试。\n' \
             "$phase" "$required_kib" "$memory_kib" >&2
         return 1
     fi
-    printf '信息：%s资源检查通过，临时空间 %s KiB，可用内存 %s KiB。\n' "$phase" "$available_kib" "$memory_kib"
+    printf '✅ 信息：%s资源检查通过，临时空间 %s KiB，可用内存 %s KiB。\n' "$phase" "$available_kib" "$memory_kib"
 }
 
 check_download_resources() {
@@ -702,7 +704,7 @@ check_download_resources() {
         '[.assets[] | select(.name == $name)] | if length == 1 then .[0].size else null end' \
         <<< "$RELEASE_INFO") || return 1
     if [[ ! "$size_bytes" =~ ^[1-9][0-9]{0,11}$ ]]; then
-        echo '错误：Release 未提供有效的压缩固件大小，无法检查下载空间。' >&2
+        echo '❌ 错误：Release 未提供有效的压缩固件大小，无法检查下载空间。' >&2
         return 1
     fi
     check_available_resources "$(((size_bytes + 1023) / 1024))" '下载压缩固件'
@@ -710,13 +712,13 @@ check_download_resources() {
 
 validate_compressed_image() {
     local status=0
-    [[ -s "$IMAGE_PATH_GZ" ]] || { echo '错误：压缩固件不存在或为空。' >&2; return 1; }
+    [[ -s "$IMAGE_PATH_GZ" ]] || { echo '❌ 错误：压缩固件不存在或为空。' >&2; return 1; }
     # 只检查压缩流和 CRC，不生成 .img；保留尾部的 fwtool 元数据。
     gunzip -t "$IMAGE_PATH_GZ" || status=$?
     case "$status" in
-        0) ;;
-        2) echo '信息：压缩流检查完成，检测到尾部附加数据；继续由 sysupgrade 检查镜像元数据。' ;;
-        *) printf '错误：压缩固件检查失败（退出码 %s），停止升级。\n' "$status" >&2; return 1 ;;
+        0) echo '✅ 信息：压缩镜像完整性检查通过。' ;;
+        2) echo '✅ 信息：压缩流检查完成，检测到尾部附加数据；继续由 sysupgrade 检查镜像元数据。' ;;
+        *) printf '❌ 错误：压缩固件检查失败（退出码 %s），停止升级。\n' "$status" >&2; return 1 ;;
     esac
 }
 
@@ -741,53 +743,60 @@ prepare_upgrade_image() {
     # 流式计算实际解压大小并校验 CRC，不依赖会在 4 GiB 时回绕的 gzip ISIZE。
     echo '信息：正在检查压缩流并计算解压大小，不生成临时解压镜像...'
     image_bytes=$(set -o pipefail; stream_image | wc -c) || {
-        echo '错误：压缩固件检查失败，停止升级。' >&2
+        echo '❌ 错误：压缩固件检查失败，停止升级。' >&2
         return 1
     }
     image_bytes=${image_bytes//[[:space:]]/}
     [[ "$image_bytes" =~ ^[1-9][0-9]{0,11}$ ]] || {
-        echo '错误：解压后的镜像大小无效，停止升级。' >&2
+        echo '❌ 错误：解压后的镜像大小无效，停止升级。' >&2
         return 1
     }
     KEEP_IMAGE=1
     check_available_resources "$(((image_bytes + 1023) / 1024))" '解压固件' || return 1
     printf '信息：正在解压固件，解压后约 %s MiB...\n' "$(((image_bytes + 1048575) / 1048576))"
     stream_image > "$IMAGE_PATH_IMG.part" || {
-        echo '错误：解压固件失败，保留压缩镜像并停止升级。' >&2
+        echo '❌ 错误：解压固件失败，保留压缩镜像并停止升级。' >&2
         return 1
     }
     [[ -s "$IMAGE_PATH_IMG.part" ]] || return 1
     mv -- "$IMAGE_PATH_IMG.part" "$IMAGE_PATH_IMG" || return 1
     IMAGE_PATH="$IMAGE_PATH_IMG"
     rm -f -- "$IMAGE_PATH_GZ"
-    echo '信息：固件解压完成，将使用 .img 升级。'
+    echo '✅ 信息：固件解压完成，将使用 .img 升级。'
 }
 
 check_upgrade_resources() {
-    local backup_bytes=0 extra_kib=0
-    check_available_resources 0 '准备升级' || return 1
+    local backup_bytes=0 extra_kib=0 backup_started
     if [[ -z "$SYSUPGRADE_ARGS" ]]; then
-        # 流式测量实际配置备份，不先在内存文件系统中生成一份大归档。
-        backup_bytes=$(set -o pipefail; sysupgrade -b - | wc -c) || {
-            echo '错误：配置备份预检查失败，停止升级；不会改为不保留配置。' >&2
-            return 1
-        }
-        backup_bytes=${backup_bytes//[[:space:]]/}
-        if [[ ! "$backup_bytes" =~ ^[1-9][0-9]{0,11}$ ]]; then
-            echo '错误：配置备份为空或大小无效，停止升级。' >&2
-            return 1
+        # 只缓存大小，不缓存归档；等待超过一分钟后重新测量。
+        if [[ "$CONFIG_BACKUP_BYTES" =~ ^[1-9][0-9]{0,11}$ ]] &&
+            ((CONFIG_BACKUP_CHECKED_AT >= 0 && SECONDS >= CONFIG_BACKUP_CHECKED_AT &&
+                SECONDS - CONFIG_BACKUP_CHECKED_AT < 60)); then
+            backup_bytes=$CONFIG_BACKUP_BYTES
+        else
+            check_available_resources 0 '准备升级' || return 1
+            # 流式测量实际配置备份，不先在内存文件系统中生成一份大归档。
+            echo '信息：正在打包配置并检查备份大小，配置较多时可能需要几秒，请稍候...'
+            backup_started=$SECONDS
+            backup_bytes=$(set -o pipefail; sysupgrade -b - | wc -c) || {
+                echo '❌ 错误：配置备份预检查失败，停止升级；不会改为不保留配置。' >&2
+                return 1
+            }
+            backup_bytes=${backup_bytes//[[:space:]]/}
+            if [[ ! "$backup_bytes" =~ ^[1-9][0-9]{0,11}$ ]]; then
+                echo '❌ 错误：配置备份为空或大小无效，停止升级。' >&2
+                return 1
+            fi
+            CONFIG_BACKUP_BYTES=$backup_bytes
+            CONFIG_BACKUP_CHECKED_AT=$SECONDS
+            printf '✅ 信息：配置备份约 %s KiB，检查耗时 %s 秒，将保留配置升级。\n' \
+                "$(((backup_bytes + 1023) / 1024))" "$((SECONDS - backup_started))"
         fi
         # 为备份及复制缓冲留两倍归档空间；正式备份仍由 sysupgrade 创建。
         extra_kib=$((2 * ((backup_bytes + 1023) / 1024)))
-        printf '信息：配置备份约 %s KiB，将保留配置升级。\n' "$(((backup_bytes + 1023) / 1024))"
     fi
+    # 每次都重新读取可用空间和内存，不复用资源检查结果。
     check_available_resources "$extra_kib" '固件升级'
-}
-
-check_upgrade_image() {
-    echo '信息：正在执行镜像预检查（sysupgrade -T），不会刷写设备。'
-    sysupgrade -T ${FORCE_FLAG:+"$FORCE_FLAG"} ${VERBOSE_FLAG:+"$VERBOSE_FLAG"} \
-        ${SYSUPGRADE_ARGS:+"$SYSUPGRADE_ARGS"} "$IMAGE_PATH"
 }
 
 # --- 退出脚本时清理本次任务的临时文件 ---
@@ -808,7 +817,7 @@ cleanup() {
 }
 
 if [[ $(id -u) != 0 ]]; then
-    echo '错误：请以 root 用户运行升级脚本。' >&2
+    echo '❌ 错误：请以 root 用户运行升级脚本。' >&2
     exit 1
 fi
 
@@ -846,7 +855,7 @@ ui_field '必需命令' "$required_cmds_list"
 ui_field 'Aria2' "$ARIA2_STATUS"
 ui_end
 echo
-echo -e "${C_BLUE}--- 步骤 1 完成 ---${C_RESET}"
+echo -e "${C_BLUE}✅ --- 步骤 1 完成 ---${C_RESET}"
 echo
 
 # 启用严格错误检查
@@ -937,7 +946,7 @@ tmp_avail=$(df -h /tmp 2>/dev/null | awk 'NR==2 {print $4}')
 ui_field '临时空间' "总计: ${tmp_size:-未知} / 可用: ${tmp_avail:-未知}"
 ui_end
 echo
-echo -e "${C_BLUE}--- 步骤 2 完成 ---${C_RESET}"
+echo -e "${C_BLUE}✅ --- 步骤 2 完成 ---${C_RESET}"
 echo
 
 # 选择 GitHub 访问方式
@@ -948,7 +957,7 @@ select_docker_version
 
 # 检测设备型号并生成文件名
 if ! detect_device_model; then
-    echo -e "${C_B_RED}错误：${C_RESET}设备型号检测失败，无法继续。" >&2
+    echo -e "${C_B_RED}❌ 错误：${C_RESET}设备型号检测失败，无法继续。" >&2
     exit 1
 fi
 
@@ -985,7 +994,7 @@ set -e
 # --- 3. 选择固件版本 ---
 echo -e "${C_BLUE}--- 步骤 3: 选择最新或历史版本 ---${C_RESET}"
 select_release || exit 1
-echo -e "${C_BLUE}--- 步骤 3 完成 ---${C_RESET}"
+echo -e "${C_BLUE}✅ --- 步骤 3 完成 ---${C_RESET}"
 echo
 
 # --- 4. 临时增大 /tmp 分区 ---
@@ -1006,7 +1015,7 @@ if [[ "$confirm_resize_tmp" =~ ^[Yy]$ ]]; then
 else
     echo -e "${C_YELLOW}信息：${C_RESET}用户选择跳过 /tmp 分区扩容。"
 fi
-echo -e "${C_BLUE}--- 步骤 4 完成 ---${C_RESET}"
+echo -e "${C_BLUE}✅ --- 步骤 4 完成 ---${C_RESET}"
 echo
 
 # --- 5. 查找固件和校验文件 URL ---
@@ -1016,10 +1025,10 @@ IMAGE_URL=$(echo "$RELEASE_INFO" | jq -r --arg NAME "$IMAGE_FILENAME_GZ" '.asset
 CHECKSUM_URL=$(echo "$RELEASE_INFO" | jq -r --arg NAME "$CHECKSUM_FILENAME" '.assets[] | select(.name==$NAME) | .browser_download_url')
 
 SKIP_CHECKSUM=0
-if [ -z "$IMAGE_URL" ] || [ "$IMAGE_URL" == "null" ]; then echo -e "${C_B_RED}错误：${C_RESET}在版本 '${C_YELLOW}${RELEASE_TAG}${C_RESET}' 中未找到固件文件 '${C_RED}${IMAGE_FILENAME_GZ}${C_RESET}'。" >&2; exit 1; fi
+if [ -z "$IMAGE_URL" ] || [ "$IMAGE_URL" == "null" ]; then echo -e "${C_B_RED}❌ 错误：${C_RESET}在版本 '${C_YELLOW}${RELEASE_TAG}${C_RESET}' 中未找到固件文件 '${C_RED}${IMAGE_FILENAME_GZ}${C_RESET}'。" >&2; exit 1; fi
 echo -e "${C_BLUE}信息：${C_RESET}找到固件下载链接: ${C_CYAN}${IMAGE_URL}${C_RESET}"
 if [ -z "$CHECKSUM_URL" ] || [ "$CHECKSUM_URL" == "null" ]; then echo -e "${C_YELLOW}警告：${C_RESET}未找到校验文件 '${C_YELLOW}${CHECKSUM_FILENAME}${C_RESET}'，将【自动跳过】文件完整性校验。"; SKIP_CHECKSUM=1; else echo -e "${C_BLUE}信息：${C_RESET}找到校验文件下载链接: ${C_CYAN}${CHECKSUM_URL}${C_RESET}"; fi
-echo -e "${C_BLUE}--- 步骤 5 完成 ---${C_RESET}"
+echo -e "${C_BLUE}✅ --- 步骤 5 完成 ---${C_RESET}"
 echo
 
 # --- 6. 下载前确认 ---
@@ -1045,7 +1054,7 @@ echo -e "${C_BLUE}--- 步骤 7: 下载文件 ---${C_RESET}"
 echo -e "${C_BLUE}信息：${C_RESET}正在下载压缩固件 '${C_CYAN}${IMAGE_FILENAME_GZ}${C_RESET}' 到 '${C_CYAN}${IMAGE_PATH_GZ}${C_RESET}' ..."
 check_download_resources || exit 1
 download_file "${GITHUB_PROXY}${IMAGE_URL}" "$IMAGE_PATH_GZ" 1800 1 || exit 1
-echo -e "${C_B_GREEN}信息：${C_RESET}压缩固件下载完成。"
+echo -e "${C_B_GREEN}✅ 信息：${C_RESET}压缩固件下载完成。"
 
 # 下载校验文件
 if [ $SKIP_CHECKSUM -eq 0 ]; then
@@ -1055,9 +1064,9 @@ if [ $SKIP_CHECKSUM -eq 0 ]; then
     if [ $dl_status -ne 0 ]; then
         echo -e "${C_YELLOW}警告：${C_RESET}下载校验文件 '${C_YELLOW}${CHECKSUM_FILENAME}${C_RESET}' 失败，将跳过文件完整性校验。"
         rm -f "$CHECKSUM_PATH"; SKIP_CHECKSUM=1;
-    else echo -e "${C_B_GREEN}信息：${C_RESET}校验文件下载完成。"; fi
+    else echo -e "${C_B_GREEN}✅ 信息：${C_RESET}校验文件下载完成。"; fi
 fi
-echo -e "${C_BLUE}--- 步骤 7 完成 ---${C_RESET}"
+echo -e "${C_BLUE}✅ --- 步骤 7 完成 ---${C_RESET}"
 echo
 
 # --- 8. 校验固件完整性 (询问是否执行) ---
@@ -1104,14 +1113,14 @@ else
     fi
 fi
 rm -f "$CHECKSUM_PATH" # 清理校验文件
-echo -e "${C_BLUE}--- 步骤 8 完成 ---${C_RESET}"
+echo -e "${C_BLUE}✅ --- 步骤 8 完成 ---${C_RESET}"
 echo
 
 # --- 9. 根据内存档位准备镜像 ---
 echo -e "${C_BLUE}--- 步骤 9: 检查并准备升级镜像 ---${C_RESET}"
 prepare_upgrade_image || exit 1
 ls -lh "$IMAGE_PATH" 2>/dev/null || ls -l "$IMAGE_PATH" || true
-echo -e "${C_BLUE}--- 步骤 9 完成 ---${C_RESET}"
+echo -e "${C_BLUE}✅ --- 步骤 9 完成 ---${C_RESET}"
 echo
 
 # --- 10. 检查空间并确定升级选项 ---
@@ -1130,7 +1139,7 @@ else
     SYSUPGRADE_ARGS=""
 fi
 check_upgrade_resources || exit 1
-echo -e "${C_BLUE}--- 步骤 10 完成 ---${C_RESET}"
+echo -e "${C_BLUE}✅ --- 步骤 10 完成 ---${C_RESET}"
 echo
 
 # --- 11. 询问可选参数并最终确认 ---
@@ -1222,19 +1231,14 @@ if [[ "$confirm_upgrade" =~ ^[Yy]$ ]]; then
     # 临近执行时再次检查资源；不自动修改保留配置选项。
     check_upgrade_resources || exit 1
     if [ -n "$FORCE_FLAG" ]; then
-        check_upgrade_image || exit 1
         # 如果启用了强制升级，使用 exec 直接替换进程，防止 SSH 断开后的误报错误
-        echo -e "${C_B_GREEN}✅ 信息：sysupgrade 命令已启动。SSH 连接即将断开，设备将重启。${C_RESET}"
+        echo -e "${C_B_GREEN}信息：开始执行 sysupgrade，由系统检查镜像并升级；升级时 SSH 连接会断开。${C_RESET}"
         echo
         exec sysupgrade ${FORCE_FLAG:+"$FORCE_FLAG"} ${VERBOSE_FLAG:+"$VERBOSE_FLAG"} ${SYSUPGRADE_ARGS:+"$SYSUPGRADE_ARGS"} "$IMAGE_PATH"
     else
         # 未启用强制升级，使用常规调用以捕获潜在的校验错误
         sysupgrade_status=0
-        if check_upgrade_image; then
-            sysupgrade ${FORCE_FLAG:+"$FORCE_FLAG"} ${VERBOSE_FLAG:+"$VERBOSE_FLAG"} ${SYSUPGRADE_ARGS:+"$SYSUPGRADE_ARGS"} "$IMAGE_PATH" || sysupgrade_status=$?
-        else
-            sysupgrade_status=$?
-        fi
+        sysupgrade ${FORCE_FLAG:+"$FORCE_FLAG"} ${VERBOSE_FLAG:+"$VERBOSE_FLAG"} ${SYSUPGRADE_ARGS:+"$SYSUPGRADE_ARGS"} "$IMAGE_PATH" || sysupgrade_status=$?
 
         if [ $sysupgrade_status -eq 0 ]; then
             echo # 换行
@@ -1242,7 +1246,7 @@ if [[ "$confirm_upgrade" =~ ^[Yy]$ ]]; then
             exit 0
         else
             echo
-            echo -e "${C_B_RED}❌ 错误：sysupgrade 预检查或执行失败 (退出码 $sysupgrade_status)。${C_RESET}"
+            echo -e "${C_B_RED}❌ 错误：sysupgrade 执行失败 (退出码 $sysupgrade_status)。${C_RESET}"
             
             # 如果之前没用过 -F，询问是否尝试强制升级
             if [[ "$FORCE_FLAG" != "-F" ]]; then
@@ -1258,8 +1262,7 @@ if [[ "$confirm_upgrade" =~ ^[Yy]$ ]]; then
                     echo -e "${C_BLUE}信息：${C_RESET}正在尝试使用强制升级选项 (-F) 重试..."
                     FORCE_FLAG="-F"
                     check_upgrade_resources || exit 1
-                    check_upgrade_image || exit 1
-                    echo -e "${C_B_GREEN}✅ 信息：正在执行强制升级命令。连接即将断开，请等待设备重启...${C_RESET}"
+                    echo -e "${C_B_GREEN}信息：正在执行强制升级命令。连接即将断开，请等待设备重启...${C_RESET}"
                     echo
                     
                     # 使用 exec 替换当前 shell 进程
