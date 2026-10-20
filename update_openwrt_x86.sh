@@ -30,8 +30,7 @@ IMAGE_PATH_GZ="$TMP_DIR/$IMAGE_FILENAME_GZ"                                # 压
 IMAGE_PATH_IMG="$TMP_DIR/$IMAGE_FILENAME_IMG"                              # 解压后固件的完整路径
 CHECKSUM_PATH="$TMP_DIR/$CHECKSUM_FILENAME"                                # 校验和文件的完整路径
 WORK_RESERVE_KIB=65536                                                    # 为升级环境和解压缓冲预留 64 MiB
-CONFIG_BACKUP_BYTES=0                                                    # 短时间内复用备份大小，避免重复打包
-CONFIG_BACKUP_CHECKED_AT=-1
+CONFIG_BACKUP_BYTES=0                                                    # 本次运行只测量一次备份大小
 KEEP_IMAGE=0                                                             # 检查通过后，取消/失败时保留镜像
 UPGRADE_MODE=compressed                                                  # compressed 或 extracted
 USE_DOCKER=false                                                         # 当前固定下载普通版 EFI 固件
@@ -693,10 +692,8 @@ prepare_upgrade_image() {
 check_upgrade_resources() {
     local backup_bytes=0 extra_kib=0 backup_started
     if [[ -z "$SYSUPGRADE_ARGS" ]]; then
-        # 只缓存大小，不缓存归档；等待超过一分钟后重新测量。
-        if [[ "$CONFIG_BACKUP_BYTES" =~ ^[1-9][0-9]{0,11}$ ]] &&
-            ((CONFIG_BACKUP_CHECKED_AT >= 0 && SECONDS >= CONFIG_BACKUP_CHECKED_AT &&
-                SECONDS - CONFIG_BACKUP_CHECKED_AT < 60)); then
+        # 本次运行只测量一次；正式配置备份仍由 sysupgrade 重新生成。
+        if [[ "$CONFIG_BACKUP_BYTES" =~ ^[1-9][0-9]{0,11}$ ]]; then
             backup_bytes=$CONFIG_BACKUP_BYTES
         else
             check_available_resources 0 '准备升级' || return 1
@@ -713,7 +710,6 @@ check_upgrade_resources() {
                 return 1
             fi
             CONFIG_BACKUP_BYTES=$backup_bytes
-            CONFIG_BACKUP_CHECKED_AT=$SECONDS
             printf '✅ 信息：配置备份约 %s，检查耗时 %s 秒，将保留配置升级。\n' \
                 "$(format_kib "$(((backup_bytes + 1023) / 1024))")" "$((SECONDS - backup_started))"
         fi
@@ -722,6 +718,26 @@ check_upgrade_resources() {
     fi
     # 每次都重新读取可用空间和内存，不复用资源检查结果。
     check_available_resources "$extra_kib" '固件升级'
+}
+
+# 记录系统进入升级交接阶段的标记；输出仍实时显示，不保存整份日志。
+run_sysupgrade() {
+    local marker="$TMP_DIR/sysupgrade-handoff" line
+    local -a command_status
+    SYSUPGRADE_HANDOFF=0
+    rm -f -- "$marker" || return 1
+    # 调用方捕获退出状态，确保 set -e 不会在收集 PIPESTATUS 前退出。
+    sysupgrade ${FORCE_FLAG:+"$FORCE_FLAG"} ${VERBOSE_FLAG:+"$VERBOSE_FLAG"} \
+        ${SYSUPGRADE_ARGS:+"$SYSUPGRADE_ARGS"} "$IMAGE_PATH" 2>&1 |
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            printf '%s\n' "$line"
+            if [[ "$line" == *'Commencing upgrade. Closing all shell sessions.'* ]]; then
+                : > "$marker" || exit 1
+            fi
+        done
+    command_status=("${PIPESTATUS[@]}")
+    [[ ! -f "$marker" ]] || SYSUPGRADE_HANDOFF=1
+    return "${command_status[0]}"
 }
 
 # --- 退出脚本时清理本次任务的临时文件 ---
@@ -736,7 +752,7 @@ cleanup() {
             rm -f -- "$file.part" "$file.part.aria2"
         fi
     done
-    rm -f -- "$TMP_DIR/release-api.json" "$TMP_DIR/release-api.json.part"
+    rm -f -- "$TMP_DIR/release-api.json" "$TMP_DIR/release-api.json.part" "$TMP_DIR/sysupgrade-handoff"
     # 保留检查通过的镜像，取消或失败后可手动升级。
     rmdir -- "$TMP_DIR" 2>/dev/null || true
 }
@@ -1130,20 +1146,26 @@ if [[ "$confirm_upgrade" =~ ^[Yy]$ ]]; then
     else
         # 未启用强制升级，使用常规调用以捕获潜在的校验错误
         sysupgrade_status=0
-        sysupgrade ${FORCE_FLAG:+"$FORCE_FLAG"} ${VERBOSE_FLAG:+"$VERBOSE_FLAG"} ${SYSUPGRADE_ARGS:+"$SYSUPGRADE_ARGS"} "$IMAGE_PATH" || sysupgrade_status=$?
+        run_sysupgrade || sysupgrade_status=$?
 
         if [ $sysupgrade_status -eq 0 ]; then
             echo # 换行
             echo -e "${C_B_GREEN}✅ 信息：sysupgrade 命令已执行。如果成功，系统将会重启。${C_RESET}"
             exit 0
+        elif [[ "$SYSUPGRADE_HANDOFF" == 1 ]]; then
+            echo
+            echo -e "${C_YELLOW}信息：系统已进入升级交接阶段，控制连接已结束（退出码 $sysupgrade_status）。${C_RESET}"
+            echo '信息：不重复执行升级；请等待设备重启后确认固件版本。'
+            exit 0
         else
             echo
             echo -e "${C_B_RED}❌ 错误：sysupgrade 执行失败 (退出码 $sysupgrade_status)。${C_RESET}"
             
-            # 如果之前没用过 -F，询问是否尝试强制升级
-            if [[ "$FORCE_FLAG" != "-F" ]]; then
-                echo -e "${C_YELLOW}分析：升级失败通常是因为固件版本检查不通过 (如 'Image metadata not present' 或 'Image check failed')。${C_RESET}"
-                echo -e "${C_YELLOW}      这在跨版本升级或刷写不同固件时很常见。${C_RESET}"
+            # 仅对校验/备份阶段的常规失败保留强制重试选项。
+            # 连接故障等其他错误不能靠 -F 解决，也不应再次启动刷写。
+            if [[ "$FORCE_FLAG" != "-F" && "$sysupgrade_status" == 1 ]]; then
+                echo -e "${C_YELLOW}提示：请查看上方系统日志，确认是镜像检查、配置备份还是设备识别失败。${C_RESET}"
+                echo -e "${C_YELLOW}      -F 仅适用于可强制忽略的镜像检查失败，不能解决备份或连接问题。${C_RESET}"
                 
                 ui_section '升级失败后的操作' "$C_B_YELLOW"
                 ui_confirm Y '使用强制升级 (-F) 重试' '不重试，退出脚本'
@@ -1164,7 +1186,7 @@ if [[ "$confirm_upgrade" =~ ^[Yy]$ ]]; then
                     exit 1
                 fi
             else
-                exit 1
+                exit "$sysupgrade_status"
             fi
         fi
     fi
