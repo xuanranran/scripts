@@ -291,6 +291,8 @@ download_file() {
     fi
     # 先写入临时文件，避免失败的下载被当成完整文件使用。
     for client in "${clients[@]}"; do
+        # 每种工具从空的临时文件开始，避免把上次失败的残片当作新结果。
+        rm -f -- "$partial" "$partial.aria2" || return 1
         downloaded=0
         case "$client" in
             aria2c)
@@ -306,16 +308,16 @@ download_file() {
                     && [[ -s "$partial" && ! -e "$partial.aria2" ]]; then
                     downloaded=1
                 else
-                    echo '❌ 分段下载失败，改用 wget/curl 重新下载...' >&2
-                    # 分段文件可能包含空洞，不能交给其他工具按连续文件续传。
-                    rm -f -- "$partial" "$partial.aria2" || return 1
+                    echo '提示：分段下载未完成，切换到 wget/curl 继续尝试...' >&2
+                    # 分段文件可能包含空洞，下一种工具启动前会清除残片。
                 fi
                 ;;
             wget)
                 command -v wget >/dev/null 2>&1 || continue
                 for attempt in 1 2 3; do
                     ((attempt == 1)) || printf '正在重试下载（%s/3）...\n' "$attempt" >&2
-                    if wget "${wget_options[@]}" -T 30 -O "$partial" "$url"; then
+                    rm -f -- "$partial" || return 1
+                    if wget "${wget_options[@]}" -T 30 -O "$partial" "$url" && [[ -s "$partial" ]]; then
                         downloaded=1
                         break
                     fi
@@ -324,7 +326,7 @@ download_file() {
             curl)
                 command -v curl >/dev/null 2>&1 || continue
                 if curl "${curl_options[@]}" --connect-timeout 15 --max-time "$timeout" --retry 2 \
-                    -o "$partial" "$url"; then
+                    -o "$partial" "$url" && [[ -s "$partial" ]]; then
                     downloaded=1
                 fi
                 ;;
@@ -450,6 +452,20 @@ get_expected_checksum() {
             if (matches == 1 && length(hash) == 64 && hash !~ /[^0-9a-fA-F]/) print tolower(hash)
             else exit 1
         }' "$CHECKSUM_PATH"
+}
+
+# 计算失败与内容不匹配分开处理，不能把文件读取错误当作校验失败让用户忽略。
+calculate_firmware_checksum() {
+    local calculated
+    calculated=$(set -o pipefail; sha256sum "$IMAGE_PATH_GZ" | awk '{print $1}') || {
+        echo '❌ 错误：读取固件或计算 SHA256 失败，停止升级。' >&2
+        return 1
+    }
+    if [[ ! "$calculated" =~ ^[0-9a-fA-F]{64}$ ]]; then
+        echo '❌ 错误：未能取得有效的固件 SHA256，停止升级。' >&2
+        return 1
+    fi
+    printf '%s\n' "${calculated,,}"
 }
 
 check_dependencies() {
@@ -595,10 +611,17 @@ format_kib() {
 
 # 按实际剩余资源检查；不把 tmpfs 挂载上限当作物理内存。
 check_available_resources() {
-    local additional_kib="$1" phase="$2" available_kib filesystem memory_kib required_kib
-    available_kib=$(df -Pk "$TMP_DIR" 2>/dev/null | awk 'END {print $4}') || return 1
-    filesystem=$(df -PT "$TMP_DIR" 2>/dev/null | awk 'END {print $2}') || return 1
-    memory_kib=$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo) || return 1
+    local additional_kib="$1" phase="$2" available_kib filesystem memory_kib required_kib space_info
+    # 一次 df 同时读取文件系统类型和可用空间，保持单位为 KiB。
+    space_info=$(set -o pipefail; df -PkT "$TMP_DIR" 2>/dev/null | awk 'END {print $2, $5}') || {
+        echo '❌ 错误：无法读取临时目录的实际可用空间，停止升级。' >&2
+        return 1
+    }
+    read -r filesystem available_kib <<< "$space_info"
+    memory_kib=$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo) || {
+        echo '❌ 错误：无法读取 MemAvailable，停止升级。' >&2
+        return 1
+    }
     if [[ ! "$available_kib" =~ ^[0-9]+$ || ! "$memory_kib" =~ ^[0-9]+$ || -z "$filesystem" ]]; then
         echo '❌ 错误：无法读取实际可用空间或 MemAvailable，停止升级。' >&2
         return 1
@@ -722,21 +745,29 @@ check_upgrade_resources() {
 
 # 记录系统进入升级交接阶段的标记；输出仍实时显示，不保存整份日志。
 run_sysupgrade() {
-    local marker="$TMP_DIR/sysupgrade-handoff" line
+    local marker="$TMP_DIR/sysupgrade-handoff" line stage=''
     local -a command_status
     SYSUPGRADE_HANDOFF=0
-    rm -f -- "$marker" || return 1
+    SYSUPGRADE_IMAGE_REJECTED=0
+    rm -f -- "$marker" || return 125
     # 调用方捕获退出状态，确保 set -e 不会在收集 PIPESTATUS 前退出。
     sysupgrade ${FORCE_FLAG:+"$FORCE_FLAG"} ${VERBOSE_FLAG:+"$VERBOSE_FLAG"} \
         ${SYSUPGRADE_ARGS:+"$SYSUPGRADE_ARGS"} "$IMAGE_PATH" 2>&1 |
         while IFS= read -r line || [[ -n "$line" ]]; do
-            printf '%s\n' "$line"
+            # 先记录阶段再输出，防止 SSH 输出中断时丢失已经交接的状态。
             if [[ "$line" == *'Commencing upgrade. Closing all shell sessions.'* ]]; then
-                : > "$marker" || exit 1
+                printf 'handoff\n' > "$marker" || exit 1
+            elif [[ "$line" == 'Image check failed.' ]]; then
+                [[ -f "$marker" ]] || printf 'image-rejected\n' > "$marker" || exit 1
             fi
+            printf '%s\n' "$line"
         done
     command_status=("${PIPESTATUS[@]}")
-    [[ ! -f "$marker" ]] || SYSUPGRADE_HANDOFF=1
+    if [[ -f "$marker" ]]; then IFS= read -r stage < "$marker" || stage=''; fi
+    case "$stage" in
+        handoff) SYSUPGRADE_HANDOFF=1 ;;
+        image-rejected) SYSUPGRADE_IMAGE_REJECTED=1 ;;
+    esac
     return "${command_status[0]}"
 }
 
@@ -999,7 +1030,7 @@ else
              echo -e "${C_YELLOW}警告：${C_RESET}在校验文件 '${C_YELLOW}${CHECKSUM_FILENAME}${C_RESET}' 中未能找到固件 '${C_YELLOW}${IMAGE_FILENAME_GZ}${C_RESET}' 的校验信息。跳过校验。"
              SKIP_CHECKSUM=1
         else
-            CALCULATED_SUM=$(sha256sum "$IMAGE_PATH_GZ" | awk '{print $1}')
+            CALCULATED_SUM=$(calculate_firmware_checksum) || exit 1
             ui_section 'SHA256 校验结果'
             ui_field '期望校验' "$EXPECTED_SUM"
             ui_field '实际校验' "$CALCULATED_SUM"
@@ -1138,58 +1169,40 @@ if [[ "$confirm_upgrade" =~ ^[Yy]$ ]]; then
 
     # 临近执行时再次检查资源；不自动修改保留配置选项。
     check_upgrade_resources || exit 1
-    if [ -n "$FORCE_FLAG" ]; then
-        # 如果启用了强制升级，使用 exec 直接替换进程，防止 SSH 断开后的误报错误
-        echo -e "${C_B_GREEN}信息：开始执行 sysupgrade，由系统检查镜像并升级；升级时 SSH 连接会断开。${C_RESET}"
-        echo
-        exec sysupgrade ${FORCE_FLAG:+"$FORCE_FLAG"} ${VERBOSE_FLAG:+"$VERBOSE_FLAG"} ${SYSUPGRADE_ARGS:+"$SYSUPGRADE_ARGS"} "$IMAGE_PATH"
-    else
-        # 未启用强制升级，使用常规调用以捕获潜在的校验错误
+    # 常规、强制和重试共用同一套执行/交接识别，不额外调用 sysupgrade -T。
+    while true; do
         sysupgrade_status=0
         run_sysupgrade || sysupgrade_status=$?
-
-        if [ $sysupgrade_status -eq 0 ]; then
-            echo # 换行
-            echo -e "${C_B_GREEN}✅ 信息：sysupgrade 命令已执行。如果成功，系统将会重启。${C_RESET}"
+        if ((sysupgrade_status == 0)); then
+            echo
+            echo -e "${C_B_GREEN}✅ 信息：sysupgrade 请求已执行，请等待设备重启后确认固件版本。${C_RESET}"
             exit 0
         elif [[ "$SYSUPGRADE_HANDOFF" == 1 ]]; then
             echo
             echo -e "${C_YELLOW}信息：系统已进入升级交接阶段，控制连接已结束（退出码 $sysupgrade_status）。${C_RESET}"
             echo '信息：不重复执行升级；请等待设备重启后确认固件版本。'
             exit 0
-        else
-            echo
-            echo -e "${C_B_RED}❌ 错误：sysupgrade 执行失败 (退出码 $sysupgrade_status)。${C_RESET}"
-            
-            # 仅对校验/备份阶段的常规失败保留强制重试选项。
-            # 连接故障等其他错误不能靠 -F 解决，也不应再次启动刷写。
-            if [[ "$FORCE_FLAG" != "-F" && "$sysupgrade_status" == 1 ]]; then
-                echo -e "${C_YELLOW}提示：请查看上方系统日志，确认是镜像检查、配置备份还是设备识别失败。${C_RESET}"
-                echo -e "${C_YELLOW}      -F 仅适用于可强制忽略的镜像检查失败，不能解决备份或连接问题。${C_RESET}"
-                
-                ui_section '升级失败后的操作' "$C_B_YELLOW"
-                ui_confirm Y '使用强制升级 (-F) 重试' '不重试，退出脚本'
-                read_input "$(ui_prompt Y)" retry_force
-                retry_force=${retry_force:-Y}
-                
-                if [[ "$retry_force" =~ ^[Yy]$ ]]; then
-                    echo -e "${C_BLUE}信息：${C_RESET}正在尝试使用强制升级选项 (-F) 重试..."
-                    FORCE_FLAG="-F"
-                    check_upgrade_resources || exit 1
-                    echo -e "${C_B_GREEN}信息：正在执行强制升级命令。连接即将断开，请等待设备重启...${C_RESET}"
-                    echo
-                    
-                    # 使用 exec 替换当前 shell 进程
-                    exec sysupgrade ${FORCE_FLAG:+"$FORCE_FLAG"} ${VERBOSE_FLAG:+"$VERBOSE_FLAG"} ${SYSUPGRADE_ARGS:+"$SYSUPGRADE_ARGS"} "$IMAGE_PATH"
-                else
-                    echo -e "${C_YELLOW}信息：用户选择不重试。脚本退出。${C_RESET}"
-                    exit 1
-                fi
-            else
-                exit "$sysupgrade_status"
-            fi
         fi
-    fi
+
+        echo
+        echo -e "${C_B_RED}❌ 错误：sysupgrade 执行失败 (退出码 $sysupgrade_status)。${C_RESET}"
+        # 只有明确的镜像拒绝才显示 -F 重试；备份、设备或连接故障不适用。
+        if [[ -n "$FORCE_FLAG" || "$SYSUPGRADE_IMAGE_REJECTED" != 1 || "$sysupgrade_status" != 1 ]]; then
+            exit "$sysupgrade_status"
+        fi
+        echo -e "${C_YELLOW}提示：系统拒绝了当前镜像，请先核对上方日志及固件型号。${C_RESET}"
+        ui_section '升级失败后的操作' "$C_B_YELLOW"
+        ui_confirm Y '使用强制升级 (-F) 重试' '不重试，退出脚本'
+        read_input "$(ui_prompt Y)" retry_force
+        retry_force=${retry_force:-Y}
+        if [[ ! "$retry_force" =~ ^[Yy]$ ]]; then
+            echo -e "${C_YELLOW}信息：用户选择不重试。脚本退出。${C_RESET}"
+            exit 1
+        fi
+        FORCE_FLAG='-F'
+        echo -e "${C_BLUE}信息：${C_RESET}正在尝试使用强制升级选项 (-F) 重试..."
+        check_upgrade_resources || exit 1
+    done
 else
     echo # 换行
     echo -e "${C_YELLOW}操作已取消。${C_RESET}固件文件保留在 '${C_CYAN}${IMAGE_PATH}${C_RESET}'，您可以手动升级或删除它。"
