@@ -745,7 +745,7 @@ check_upgrade_resources() {
 
 # 记录系统进入升级交接阶段的标记；输出仍实时显示，不保存整份日志。
 run_sysupgrade() {
-    local marker="$TMP_DIR/sysupgrade-handoff" line stage=''
+    local marker="$TMP_DIR/sysupgrade-handoff" line stage='' handoff_seen=0
     local -a command_status
     SYSUPGRADE_HANDOFF=0
     SYSUPGRADE_IMAGE_REJECTED=0
@@ -757,8 +757,15 @@ run_sysupgrade() {
             # 先记录阶段再输出，防止 SSH 输出中断时丢失已经交接的状态。
             if [[ "$line" == *'Commencing upgrade. Closing all shell sessions.'* ]]; then
                 printf 'handoff\n' > "$marker" || exit 1
+                handoff_seen=1
             elif [[ "$line" == 'Image check failed.' ]]; then
                 [[ -f "$marker" ]] || printf 'image-rejected\n' > "$marker" || exit 1
+            fi
+            # 只静默交接后的升级 ubus 断连；其他调用、原因和交接前错误原样显示。
+            if [[ "$handoff_seen" == 1 ]] &&
+                [[ "$line" == 'Command failed: Connection failed' ||
+                   "$line" == 'Command failed: ubus call system sysupgrade {'*'} (Connection failed)' ]]; then
+                continue
             fi
             printf '%s\n' "$line"
         done
@@ -1177,10 +1184,10 @@ if [[ "$confirm_upgrade" =~ ^[Yy]$ ]]; then
             echo
             echo -e "${C_B_GREEN}✅ 信息：sysupgrade 请求已执行，请等待设备重启后确认固件版本。${C_RESET}"
             exit 0
-        elif [[ "$SYSUPGRADE_HANDOFF" == 1 ]]; then
+        elif [[ "$SYSUPGRADE_HANDOFF" == 1 &&
+                ( "$sysupgrade_status" == 10 || "$sysupgrade_status" == 246 ) ]]; then
             echo
-            echo -e "${C_YELLOW}信息：系统已进入升级交接阶段，控制连接已结束（退出码 $sysupgrade_status）。${C_RESET}"
-            echo '信息：不重复执行升级；请等待设备重启后确认固件版本。'
+            echo -e "${C_YELLOW}信息：请等待设备重启后确认固件版本，请勿重复执行升级。${C_RESET}"
             exit 0
         fi
 
