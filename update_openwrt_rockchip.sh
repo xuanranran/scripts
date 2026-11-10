@@ -828,7 +828,7 @@ prepare_upgrade_image() {
 }
 
 check_upgrade_resources() {
-    local backup_bytes=0 extra_kib=0 backup_started
+    local backup_bytes=0 extra_kib=0 backup_started backup_kib growth_kib
     if [[ -z "$SYSUPGRADE_ARGS" ]]; then
         # 本次运行只测量一次；正式配置备份仍由 sysupgrade 重新生成。
         if [[ "$CONFIG_BACKUP_BYTES" =~ ^[1-9][0-9]{0,11}$ ]]; then
@@ -851,8 +851,13 @@ check_upgrade_resources() {
             printf '✅ 信息：配置备份约 %s，检查耗时 %s 秒，将保留配置升级。\n' \
                 "$(format_kib "$(((backup_bytes + 1023) / 1024))")" "$((SECONDS - backup_started))"
         fi
-        # 为备份及复制缓冲留两倍归档空间；正式备份仍由 sysupgrade 创建。
-        extra_kib=$((2 * ((backup_bytes + 1023) / 1024)))
+        # 原生 sysupgrade 在 /tmp 创建一份归档，切换 ramfs 时沿用该挂载，
+        # 不会再复制一份完整备份到内存。复制缓冲计入原有 64 MiB 工作余量。
+        # 另留 10%（至少 4 MiB）应对正式备份相对本次测量的小幅增长。
+        backup_kib=$(((backup_bytes + 1023) / 1024))
+        growth_kib=$(((backup_kib + 9) / 10))
+        ((growth_kib >= 4096)) || growth_kib=4096
+        extra_kib=$((backup_kib + growth_kib))
     fi
     # 每次都重新读取可用空间和内存，不复用资源检查结果。
     check_available_resources "$extra_kib" '固件升级'
@@ -893,6 +898,56 @@ run_sysupgrade() {
     return "${command_status[0]}"
 }
 
+# 正在运行的脚本、已交接给 sysupgrade 的镜像，以及挂载点都不能清理。
+upgrade_dir_in_use() {
+    local directory="$1" owner_pid="" cmdline proc_root="${2:-/proc}" mount_status=0
+    if [[ -r "$directory/.updater-pid" ]]; then
+        IFS= read -r owner_pid < "$directory/.updater-pid" || owner_pid=""
+        if [[ "$owner_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    if [[ -r "$proc_root/self/mountinfo" ]]; then
+        awk -v path="$directory" '$5 == path || index($5, path "/") == 1 { found=1 } END { exit !found }' \
+            "$proc_root/self/mountinfo" || mount_status=$?
+        # 找到挂载点或读取检查出错时都保留目录。
+        ((mount_status == 1)) || return 0
+    fi
+    # 兼容旧脚本没有 PID 标记、或脚本退出后原生升级仍在读取镜像的情况。
+    for cmdline in "$proc_root"/[0-9]*/cmdline; do
+        [[ -r "$cmdline" ]] || continue
+        if tr '\0' '\n' < "$cmdline" 2>/dev/null | grep -F -- "$directory/" >/dev/null; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+cleanup_old_upgrade_dirs() {
+    local root="$1" directory name removed=0
+    root=$(cd -- "$root" && pwd -P) || return 1
+    for directory in "$root"/openwrt-upgrade.*; do
+        [[ -d "$directory" && ! -L "$directory" ]] || continue
+        name=${directory##*/}
+        # 仅匹配 mktemp 创建的六位后缀；删除目标必须是该临时目录的直接子目录。
+        [[ "$name" =~ ^openwrt-upgrade[.][A-Za-z0-9]{6}$ && "${directory%/*}" == "$root" ]] || continue
+        [[ "$name" != "${TMP_DIR##*/}" ]] || continue
+        if upgrade_dir_in_use "$directory"; then
+            printf '信息：保留正在使用的升级临时目录：%s。\n' "$directory"
+            continue
+        fi
+        if ! rm -rf -- "$directory"; then
+            printf '❌ 错误：无法清理旧升级临时目录：%s，停止运行。\n' "$directory" >&2
+            return 1
+        fi
+        removed=$((removed + 1))
+    done
+    if ((removed > 0)); then
+        printf '✅ 信息：已清理 %s 个旧升级临时目录。\n' "$removed"
+    fi
+    return 0
+}
+
 # --- 退出脚本时清理本次任务的临时文件 ---
 cleanup() {
     local file
@@ -905,7 +960,7 @@ cleanup() {
             rm -f -- "$file.part" "$file.part.aria2"
         fi
     done
-    rm -f -- "$TMP_DIR/release-api.json" "$TMP_DIR/release-api.json.part" "$TMP_DIR/sysupgrade-handoff"
+    rm -f -- "$TMP_DIR/release-api.json" "$TMP_DIR/release-api.json.part" "$TMP_DIR/sysupgrade-handoff" "$TMP_DIR/.updater-pid"
     # 保留检查通过的镜像，取消或失败后可手动升级。
     rmdir -- "$TMP_DIR" 2>/dev/null || true
 }
@@ -924,6 +979,10 @@ fi
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+# 先登记本次任务，再清理同一临时根目录下不再使用的旧任务。
+printf '%s\n' "$$" > "$TMP_DIR/.updater-pid" || exit 1
+cleanup_old_upgrade_dirs "${TMP_DIR%/*}" || exit 1
 
 # 首次绘制前刷新 Bash 的终端列数，兼容没有 stty 的 OpenWrt。
 # 外部命令在主流程执行，避免首个标题先用默认宽度绘制。
