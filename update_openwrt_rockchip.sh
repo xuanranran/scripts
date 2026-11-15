@@ -39,6 +39,18 @@ USE_DOCKER=false  # 是否使用 Docker 版本
 DEVICE_MODEL=""  # 设备型号标识
 BOOT_DISK=""     # 当前启动盘，由系统升级函数识别
 BOOT_MEDIUM="未识别"
+INSTALL_MODE=sysupgrade
+TARGET_DISK=""
+TARGET_CID=""
+TARGET_SECTORS=0
+TARGET_KIND=""
+TARGET_MEDIUM=""
+REQUEST_EMMC_ERASE=0
+ERASE_EMMC_CID=""
+ERASE_EMMC_SECTORS=0
+PENDING_EMMC_CID=""
+PENDING_EMMC_SECTORS=0
+MEDIA_BOOT_MOUNTED=0
 
 # 动态文件名（将在检测型号和Docker选择后生成）
 IMAGE_FILENAME_GZ=""  # 压缩固件的文件名
@@ -699,6 +711,363 @@ detect_boot_medium() {
     echo '信息：升级当前启动盘；SD 卡和 eMMC 均支持保留配置选项。'
 }
 
+# 只接受 SD/eMMC 用户区整盘，排除 boot0、boot1、rpmb 和分区节点。
+get_mmc_info() {
+    local disk="$1" kind cid sectors
+    [[ "$disk" =~ ^mmcblk[0-9]+$ && -b "/dev/$disk" ]] || return 1
+    kind=$(cat "/sys/class/block/$disk/device/type") || return 1
+    cid=$(cat "/sys/class/block/$disk/device/cid") || return 1
+    sectors=$(cat "/sys/class/block/$disk/size") || return 1
+    [[ "$kind" == SD || "$kind" == MMC ]] || return 1
+    [[ "$cid" =~ ^[a-fA-F0-9]{32}$ && "$sectors" =~ ^[1-9][0-9]{0,11}$ ]] || return 1
+    printf '%s %s %s\n' "$kind" "$cid" "$sectors"
+}
+
+list_mmc_disks() {
+    local path disk info
+    for path in /sys/class/block/mmcblk*; do
+        disk=${path##*/}
+        info=$(get_mmc_info "$disk" 2>/dev/null) || continue
+        printf '%s %s\n' "$disk" "$info"
+    done
+}
+
+# 新写入的 SD 可能与 eMMC 有相同 PARTUUID，不能仅按启动参数中的 UUID 猜盘。
+# 从已挂载的 /rom（squashfs）或 /（ext4）的设备号识别正在运行的实际介质。
+get_media_boot_disk() {
+    local device path disk
+    device=$(awk '$5 == "/rom" {rom=$3} $5 == "/" {root=$3}
+        END {if (rom != "") print rom; else print root}' /proc/self/mountinfo) || return 1
+    [[ "$device" =~ ^[0-9]+:[0-9]+$ && "$device" != 0:* ]] || return 1
+    path=$(readlink -f "/sys/dev/block/$device") || return 1
+    disk=${path##*/}
+    if [[ -f "/sys/class/block/$disk/partition" ]]; then
+        path=${path%/*}; disk=${path##*/}
+    fi
+    get_mmc_info "$disk" >/dev/null || return 1
+    printf '%s\n' "$disk"
+}
+
+# 每次写盘前重新检查启动盘、CID、容量、挂载点、swap 和设备持有者。
+check_inactive_mmc() {
+    local disk="$1" cid="$2" kind="$3" sectors="$4" boot info mounts holder swap_status
+    [[ "$disk" =~ ^mmcblk[0-9]+$ ]] || return 1
+    boot=$(get_media_boot_disk) || { echo '❌ 错误：无法确定当前启动盘，禁止写盘。' >&2; return 1; }
+    [[ -n "$boot" && "$boot" != "$disk" ]] || {
+        echo '❌ 错误：禁止覆盖当前启动盘。' >&2; return 1;
+    }
+    info=$(get_mmc_info "$disk") || return 1
+    [[ "$info" == "$kind $cid $sectors" ]] || {
+        echo '❌ 错误：目标介质已拔出、更换或容量发生变化，停止操作。' >&2; return 1;
+    }
+    mounts=$(lsblk -nr -o MOUNTPOINT "/dev/$disk") || return 1
+    [[ -z "${mounts//[[:space:]]/}" ]] || {
+        echo "❌ 错误：/dev/$disk 有已挂载分区，请先卸载后重新运行。" >&2; return 1;
+    }
+    swap_status=$(awk -v disk="/dev/$disk" '$1 == disk || index($1, disk "p") == 1 { busy=1 } END { print busy+0 }' /proc/swaps) || {
+        echo '❌ 错误：无法读取 swap 状态，禁止写盘。' >&2; return 1;
+    }
+    [[ "$swap_status" == 0 ]] || { echo '❌ 错误：目标介质正在用于 swap。' >&2; return 1; }
+    for holder in "/sys/class/block/$disk/holders/"* "/sys/class/block/$disk/""$disk"p*/holders/*; do
+        [[ ! -e "$holder" ]] || { echo '❌ 错误：目标介质正在被其他块设备使用。' >&2; return 1; }
+    done
+}
+
+choose_mmc_disk() {
+    local kind="$1" cid_filter="${2:-}" disk found_kind cid sectors choice index=0
+    local -a names=() ids=() sizes=()
+    ui_section '选择目标介质'
+    while read -r disk found_kind cid sectors; do
+        [[ "$found_kind" == "$kind" && "$disk" != "$BOOT_DISK" ]] || continue
+        [[ -z "$cid_filter" || "$cid_filter" == "$cid" ]] || continue
+        names+=("$disk"); ids+=("$cid"); sizes+=("$sectors")
+        index=$((index + 1))
+        ui_option "$index" "/dev/$disk" "$(format_kib "$((sectors / 2))")"
+    done < <(list_mmc_disks)
+    ((${#names[@]} > 0)) || { ui_end; echo '❌ 未找到可用的目标介质。' >&2; return 1; }
+    ui_option q '取消操作'
+    while true; do
+        read_input '请选择目标编号 [无默认选项，q 取消]：' choice
+        [[ "$choice" != q && "$choice" != Q ]] || return 1
+        if [[ "$choice" =~ ^[1-9][0-9]{0,2}$ ]] && ((choice <= ${#names[@]})); then
+            TARGET_DISK=${names[choice-1]}; TARGET_CID=${ids[choice-1]}; TARGET_SECTORS=${sizes[choice-1]}
+            TARGET_KIND=$kind
+            if [[ "$kind" == SD ]]; then TARGET_MEDIUM='SD 卡'; else TARGET_MEDIUM=eMMC; fi
+            check_inactive_mmc "$TARGET_DISK" "$TARGET_CID" "$kind" "$TARGET_SECTORS"
+            return $?
+        fi
+        echo '请明确输入有效的目标编号或 q。'
+    done
+}
+
+confirm_media_write() {
+    local action="$1" answer
+    ui_section "$action" "$C_B_RED"
+    ui_field '目标整盘' "/dev/$TARGET_DISK"
+    ui_field '容量' "$(format_kib "$((TARGET_SECTORS / 2))")"
+    ui_field '设备标识' "$TARGET_CID"
+    ui_field '注意' '目标整盘的所有分区和数据都将被覆盖，此操作不可撤销。'
+    ui_field '当前启动盘' "/dev/$BOOT_DISK（不会写入）"
+    read_input "请输入完整设备名 /dev/$TARGET_DISK 确认，其他输入取消：" answer
+    [[ "$answer" == "/dev/$TARGET_DISK" ]] || { echo '操作已取消，未写入目标介质。'; return 1; }
+}
+
+# 只读取数据标记，不执行 SD 卡中的任何命令；清理仍需重新选择并输入设备名。
+access_emmc_cleanup_request() {
+    local action="$1" boot info mount_dir="$TMP_DIR/media-boot" marker extra cid sectors size result=0 options=ro
+    boot=$(get_media_boot_disk) || return 1
+    info=$(get_mmc_info "$boot") || return 1
+    [[ "$info" == SD\ * && -b "/dev/${boot}p1" ]] || return 1
+    [[ "$action" != clear ]] || options=rw
+    mkdir -p "$mount_dir" || return 1
+    mount -o "$options,noatime" "/dev/${boot}p1" "$mount_dir" || return 1
+    MEDIA_BOOT_MOUNTED=1
+    marker="$mount_dir/openwrt-upgrade-emmc-cleanup"
+    if [[ "$action" == load ]]; then
+        PENDING_EMMC_CID=""; PENDING_EMMC_SECTORS=0
+        if [[ -f "$marker" && ! -L "$marker" ]]; then
+            size=$(wc -c < "$marker") || result=1
+            if [[ "$size" =~ ^[0-9]+$ ]] && ((size <= 128)) &&
+                IFS=' ' read -r cid sectors extra < "$marker" &&
+                [[ "$cid" =~ ^[a-fA-F0-9]{32}$ && "$sectors" =~ ^[1-9][0-9]{0,11}$ && -z "$extra" ]]; then
+                PENDING_EMMC_CID=$cid; PENDING_EMMC_SECTORS=$sectors
+                echo '信息：检测到上次 SD 烧录时记录的 eMMC 清理请求，请确认 SD 系统及配置正常后再继续。'
+            else
+                echo '❌ 错误：eMMC 清理请求格式无效，停止清理。' >&2; result=1
+            fi
+        fi
+    elif [[ "$action" == clear ]]; then
+        rm -f -- "$marker" && sync || result=1
+    else
+        result=1
+    fi
+    umount "$mount_dir" || return 1
+    MEDIA_BOOT_MOUNTED=0
+    rmdir "$mount_dir" || return 1
+    return "$result"
+}
+
+erase_inactive_emmc() {
+    local boot info blocks tail_sectors cmd
+    confirm_media_write '整盘覆盖清空 eMMC' || return 1
+    boot=$(get_media_boot_disk) || return 1
+    info=$(get_mmc_info "$boot") || return 1
+    [[ "$info" == SD\ * ]] || { echo '❌ 错误：必须先从 SD 卡启动，才能清空 eMMC。' >&2; return 1; }
+    check_inactive_mmc "$TARGET_DISK" "$TARGET_CID" MMC "$TARGET_SECTORS" || return 1
+    [[ -z "$PENDING_EMMC_CID" || "$PENDING_EMMC_CID $PENDING_EMMC_SECTORS" == "$TARGET_CID $TARGET_SECTORS" ]] || {
+        echo '❌ 错误：当前 eMMC 与记录的清理目标不一致，停止操作。' >&2; return 1;
+    }
+    for cmd in dd partx; do
+        command -v "$cmd" >/dev/null 2>&1 || { echo "❌ 缺少清理工具：$cmd" >&2; return 1; }
+    done
+    blocks=$((TARGET_SECTORS / 2048)); tail_sectors=$((TARGET_SECTORS % 2048))
+    echo '信息：正在用零覆盖 eMMC 用户区整盘，请保持通电，较大容量可能需要较长时间...'
+    dd if=/dev/zero of="/dev/$TARGET_DISK" bs=1M count="$blocks" conv=fsync || return 1
+    if ((tail_sectors > 0)); then
+        dd if=/dev/zero of="/dev/$TARGET_DISK" bs=512 seek="$((blocks * 2048))" count="$tail_sectors" conv=notrunc,fsync || return 1
+    fi
+    sync || return 1
+    partx -d - "/dev/$TARGET_DISK" || echo '警告：eMMC 数据已覆盖清空，但内核分区列表刷新失败，重启后生效。' >&2
+    if [[ -n "$PENDING_EMMC_CID" ]]; then
+        access_emmc_cleanup_request clear || echo '警告：eMMC 已清空，但 SD 中的清理请求标记未能删除。' >&2
+    fi
+    echo '✅ 信息：eMMC 用户区整盘覆盖完成，当前 SD 卡系统继续运行。'
+}
+
+select_install_target() {
+    local disk kind cid sectors choice has_sd=0 has_emmc=0 boot_info boot_disk target_kind target_medium answer
+    INSTALL_MODE=sysupgrade
+    REQUEST_EMMC_ERASE=0
+    boot_disk=$(get_media_boot_disk) || return 0
+    BOOT_DISK=$boot_disk
+    boot_info=$(get_mmc_info "$BOOT_DISK" 2>/dev/null) || return 0
+    if [[ "$boot_info" == SD\ * ]]; then BOOT_MEDIUM='SD 卡'; else BOOT_MEDIUM=eMMC; fi
+    while read -r disk kind cid sectors; do
+        [[ "$disk" != "$BOOT_DISK" ]] || continue
+        [[ "$kind" != SD ]] || has_sd=1
+        [[ "$kind" != MMC ]] || has_emmc=1
+    done < <(list_mmc_disks)
+    if [[ "$boot_info" == MMC\ * && "$has_sd" == 1 ]]; then
+        target_kind=SD; target_medium='SD 卡'
+    elif [[ "$boot_info" == SD\ * && "$has_emmc" == 1 ]]; then
+        target_kind=MMC; target_medium=eMMC
+    else
+        return 0
+    fi
+    ui_section '升级或介质操作'
+    ui_option 1 '升级当前启动盘（sysupgrade）' '默认，保留原有流程和选项'
+    ui_option 2 "将固件整盘烧录到 $target_medium（dd）" "覆盖所选 $target_medium，不升级当前系统"
+    if [[ "$boot_info" == SD\ * && "$has_emmc" == 1 ]]; then
+        ui_option 3 '整盘覆盖清空未使用的 eMMC' '清空全部分区和数据'
+    fi
+    ui_option q '取消操作'
+    while true; do
+        read_input '请选择操作 [默认：1，q 取消]：' choice
+        case "$choice" in
+            ''|1) return 0 ;;
+            2) choose_mmc_disk "$target_kind" || return 1
+               if [[ "$target_kind" == SD ]]; then
+                   ui_section '迁移后的 eMMC 清理'
+                   ui_field '执行时机' '先完成 SD 烧录；切换到 SD 启动并确认正常后，再次运行脚本确认清空。'
+                   ui_confirm N '从 SD 启动后，整盘覆盖清空 eMMC' '保留 eMMC 全部分区和数据'
+                   read_input "$(ui_prompt N)" answer
+                   if [[ "$answer" =~ ^[Yy]$ ]]; then
+                       read -r kind ERASE_EMMC_CID ERASE_EMMC_SECTORS <<< "$boot_info"
+                       REQUEST_EMMC_ERASE=1
+                   fi
+               fi
+               INSTALL_MODE=media; return 0 ;;
+            3) if [[ "$boot_info" == SD\ * && "$has_emmc" == 1 ]]; then
+                   access_emmc_cleanup_request load || return 1
+                   choose_mmc_disk MMC "$PENDING_EMMC_CID" && erase_inactive_emmc || return 1
+                   exit 0
+               fi ;;
+            q|Q) return 1 ;;
+        esac
+        echo '无效选项，请重新选择。'
+    done
+}
+
+media_image_stream() {
+    if [[ "$UPGRADE_MODE" == compressed ]]; then stream_image; else cat "$IMAGE_PATH"; fi
+}
+
+# 完整 MiB 使用大块读取，尾部按扇区读；校验范围与镜像完全相同。
+read_media_image_bytes() {
+    local bytes="$1" blocks tail_sectors
+    blocks=$((bytes / 4194304)); tail_sectors=$((bytes % 4194304 / 512))
+    if ((blocks > 0)); then
+        dd if="/dev/$TARGET_DISK" bs=4M count="$blocks" || return 1
+    fi
+    if ((tail_sectors > 0)); then
+        dd if="/dev/$TARGET_DISK" bs=512 skip="$((blocks * 8192))" count="$tail_sectors" || return 1
+    fi
+}
+
+# 本项目 Rockchip 镜像为 MBR，U-Boot 动态读取分区 UUID。
+# 给目标介质单独的磁盘签名，避免相同固件的 SD/eMMC 并存时 root/配置恢复选错盘。
+validate_media_mbr() {
+    local header="$TMP_DIR/media-mbr.bin" magic part_type offset
+    [[ $(wc -c < "$header") == 512 ]] || return 1
+    magic=$(od -An -tx1 -j 510 -N 2 "$header") || return 1
+    [[ "${magic//[[:space:]]/}" == 55aa ]] || return 1
+    for offset in 450 466 482 498; do
+        part_type=$(od -An -tu1 -j "$offset" -N 1 "$header") || return 1
+        if [[ "${part_type//[[:space:]]/}" == 238 ]]; then
+            echo '❌ 错误：当前介质烧录模式仅支持本项目的 MBR 镜像，不修改 GPT 磁盘。' >&2
+            return 1
+        fi
+    done
+}
+
+# 消费完整压缩流；仅保留前 512 字节，不生成完整解压镜像。
+capture_media_image_size() {
+    local remainder
+    head -c 512 > "$TMP_DIR/media-mbr.bin" || return 1
+    [[ $(wc -c < "$TMP_DIR/media-mbr.bin") == 512 ]] || return 1
+    remainder=$(wc -c) || return 1
+    remainder=${remainder//[[:space:]]/}
+    [[ "$remainder" =~ ^[0-9]{1,12}$ ]] || return 1
+    printf '%s\n' "$((remainder + 512))"
+}
+
+set_media_disk_signature() {
+    local header="$TMP_DIR/media-mbr.bin" signature_file="$TMP_DIR/media-id.bin"
+    local original boot_signature signature actual attempt
+    check_inactive_mmc "$TARGET_DISK" "$TARGET_CID" "$TARGET_KIND" "$TARGET_SECTORS" || return 1
+    dd if="/dev/$TARGET_DISK" of="$header" bs=512 count=1 || return 1
+    validate_media_mbr || return 1
+    original=$(od -An -tx1 -j 440 -N 4 "$header") || return 1
+    boot_signature=$(set -o pipefail; dd if="/dev/$BOOT_DISK" bs=1 skip=440 count=4 | od -An -tx1) || return 1
+    original=${original//[[:space:]]/}; boot_signature=${boot_signature//[[:space:]]/}
+    [[ "$original" =~ ^[a-f0-9]{8}$ && "$boot_signature" =~ ^[a-f0-9]{8}$ ]] || return 1
+    for attempt in 1 2 3 4; do
+        dd if=/dev/urandom of="$signature_file" bs=4 count=1 || return 1
+        signature=$(od -An -tx1 "$signature_file") || return 1
+        signature=${signature//[[:space:]]/}
+        [[ "$signature" =~ ^[a-f0-9]{8}$ && "$signature" != 00000000 &&
+            "$signature" != "$original" && "$signature" != "$boot_signature" ]] && break
+    done
+    [[ "$signature" =~ ^[a-f0-9]{8}$ && "$signature" != 00000000 &&
+        "$signature" != "$original" && "$signature" != "$boot_signature" ]] || return 1
+    check_inactive_mmc "$TARGET_DISK" "$TARGET_CID" "$TARGET_KIND" "$TARGET_SECTORS" || return 1
+    dd if="$signature_file" of="/dev/$TARGET_DISK" bs=1 seek=440 count=4 conv=notrunc,fsync || return 1
+    actual=$(set -o pipefail; dd if="/dev/$TARGET_DISK" bs=1 skip=440 count=4 | od -An -tx1) || return 1
+    [[ "${actual//[[:space:]]/}" == "$signature" ]] || return 1
+    echo '✅ 信息：已设置目标介质的独立磁盘标识，避免与当前启动盘的分区 UUID 冲突。'
+}
+
+write_media_image() {
+    local image_bytes backup="$TMP_DIR/media-config.tgz" mount_dir="$TMP_DIR/media-boot" info available required expected actual cmd
+    [[ "$TARGET_KIND" == SD || "$TARGET_KIND" == MMC ]] || return 1
+    for cmd in dd partx mount umount od; do
+        command -v "$cmd" >/dev/null 2>&1 || { echo "❌ 缺少烧录工具：$cmd" >&2; return 1; }
+    done
+    check_inactive_mmc "$TARGET_DISK" "$TARGET_CID" "$TARGET_KIND" "$TARGET_SECTORS" || return 1
+    echo '信息：正在计算完整镜像大小并检查目标容量，不生成完整解压镜像...'
+    image_bytes=$(set -o pipefail; media_image_stream | capture_media_image_size) || return 1
+    image_bytes=${image_bytes//[[:space:]]/}
+    [[ "$image_bytes" =~ ^[1-9][0-9]{0,11}$ ]] && ((image_bytes % 512 == 0 && image_bytes <= TARGET_SECTORS * 512)) || {
+        echo '❌ 错误：镜像大小无效或目标介质容量不足，未写盘。' >&2; return 1;
+    }
+    validate_media_mbr || { echo '❌ 错误：烧录镜像的分区表不受支持，未写盘。' >&2; return 1; }
+    confirm_media_write "确认整盘烧录到 $TARGET_MEDIUM" || return 1
+    check_upgrade_resources || return 1
+    if [[ -z "$SYSUPGRADE_ARGS" ]]; then
+        echo "信息：正在生成迁移到 $TARGET_MEDIUM 的配置备份..."
+        sysupgrade -b "$backup" || return 1
+        [[ -s "$backup" ]] || return 1
+    fi
+    check_inactive_mmc "$TARGET_DISK" "$TARGET_CID" "$TARGET_KIND" "$TARGET_SECTORS" || return 1
+    echo "信息：正在整盘写入 $TARGET_MEDIUM /dev/$TARGET_DISK，请勿移除介质或断电..."
+    (set -o pipefail; media_image_stream | dd of="/dev/$TARGET_DISK" bs=4M conv=fsync) || {
+        echo '❌ 错误：目标介质写入失败，当前启动盘未被写入。' >&2; return 1;
+    }
+    sync || return 1
+    # 写入后读回完整镜像范围，避免仅凭 dd 退出码就提示烧录成功。
+    echo "信息：正在读回 $TARGET_MEDIUM 并校验完整镜像，请稍候..."
+    expected=$(set -o pipefail; media_image_stream | sha256sum | awk '{print $1}') || return 1
+    actual=$(set -o pipefail; read_media_image_bytes "$image_bytes" 2>/dev/null | sha256sum | awk '{print $1}') || return 1
+    [[ "$expected" =~ ^[a-fA-F0-9]{64}$ && "$expected" == "$actual" ]] || {
+        echo '❌ 错误：目标介质写入读回校验失败，当前启动盘未被写入。' >&2; return 1;
+    }
+    set_media_disk_signature || { echo '❌ 错误：目标介质磁盘标识设置失败，请保留当前启动盘。' >&2; return 1; }
+    if [[ -z "$SYSUPGRADE_ARGS" || "$REQUEST_EMMC_ERASE" == 1 ]]; then
+        check_inactive_mmc "$TARGET_DISK" "$TARGET_CID" "$TARGET_KIND" "$TARGET_SECTORS" || return 1
+        partx -d - "/dev/$TARGET_DISK" && partx -a - "/dev/$TARGET_DISK" || return 1
+        info=$(get_mmc_info "$TARGET_DISK") || return 1
+        [[ "$info" == "$TARGET_KIND $TARGET_CID $TARGET_SECTORS" && -b "/dev/${TARGET_DISK}p1" ]] || return 1
+        mkdir -p "$mount_dir" || return 1
+        mount -o rw,noatime "/dev/${TARGET_DISK}p1" "$mount_dir" || return 1
+        MEDIA_BOOT_MOUNTED=1
+        if [[ -z "$SYSUPGRADE_ARGS" ]]; then
+            available=$(set -o pipefail; df -Pk "$mount_dir" | awk 'END {print $4}') || return 1
+            required=$(wc -c < "$backup") || return 1
+            [[ "$available" =~ ^[0-9]+$ ]] && ((available >= (required + 1023) / 1024 + 1024)) || {
+                echo '❌ 错误：目标启动分区无法容纳配置备份；请保留当前启动盘。' >&2; return 1;
+            }
+            cp -f -- "$backup" "$mount_dir/sysupgrade.tgz" || return 1
+            expected=$(set -o pipefail; sha256sum "$backup" | awk '{print $1}') || return 1
+            actual=$(set -o pipefail; sha256sum "$mount_dir/sysupgrade.tgz" | awk '{print $1}') || return 1
+            [[ "$expected" =~ ^[a-fA-F0-9]{64}$ && "$expected" == "$actual" ]] || return 1
+        fi
+        if [[ "$REQUEST_EMMC_ERASE" == 1 && "$TARGET_KIND" == SD ]]; then
+            [[ "$ERASE_EMMC_CID" =~ ^[a-fA-F0-9]{32}$ && "$ERASE_EMMC_SECTORS" =~ ^[1-9][0-9]{0,11}$ ]] || return 1
+            printf '%s %s\n' "$ERASE_EMMC_CID" "$ERASE_EMMC_SECTORS" > "$mount_dir/openwrt-upgrade-emmc-cleanup" || return 1
+        fi
+        sync && umount "$mount_dir" || return 1
+        MEDIA_BOOT_MOUNTED=0
+        rmdir "$mount_dir" || return 1
+        [[ -n "$SYSUPGRADE_ARGS" ]] || echo '✅ 信息：配置备份已放入目标启动分区，供新系统首次启动恢复。'
+        [[ "$REQUEST_EMMC_ERASE" != 1 ]] || echo '✅ 信息：已记录 eMMC 清理请求；从 SD 启动后再次运行脚本，选择清空 eMMC 并确认。'
+    fi
+    echo "✅ 信息：$TARGET_MEDIUM 整盘烧录及读回校验完成，当前启动盘未被写入。"
+    echo "信息：请切换到 $TARGET_MEDIUM 启动，确认新系统及配置正常。"
+    if [[ "$TARGET_KIND" == SD ]]; then
+        echo '信息：若需清空 eMMC，从 SD 启动后再次运行本脚本，选择清空未使用的 eMMC。'
+    fi
+}
+
 # 按标称内存的 90% 划分档位，为硬件保留内存留余量（4G 机型可能只显示 3.77 GiB）。
 select_upgrade_mode() {
     local total_kib="$1" nominal_gib=2
@@ -951,6 +1320,12 @@ cleanup_old_upgrade_dirs() {
 # --- 退出脚本时清理本次任务的临时文件 ---
 cleanup() {
     local file
+    if [[ "$MEDIA_BOOT_MOUNTED" == 1 ]]; then
+        umount "$TMP_DIR/media-boot" || { echo '警告：目标启动分区仍被挂载，请手动卸载。' >&2; return 1; }
+        MEDIA_BOOT_MOUNTED=0
+    fi
+    rm -f -- "$TMP_DIR/media-config.tgz" "$TMP_DIR/media-mbr.bin" "$TMP_DIR/media-id.bin"
+    rmdir "$TMP_DIR/media-boot" 2>/dev/null || :
     for file in "${IMAGE_PATH_GZ:-}" "${IMAGE_PATH_IMG:-}" "${CHECKSUM_PATH:-}"; do
         if [[ -n "$file" ]]; then
             if [[ ${KEEP_IMAGE:-0} != 1 ||
@@ -1103,6 +1478,7 @@ echo -e "${C_BLUE}✅ --- 步骤 2 完成 ---${C_RESET}"
 echo
 
 # 选择 GitHub 访问方式
+select_install_target || exit 1
 select_github_access
 
 # 选择 Docker 版本
@@ -1294,6 +1670,11 @@ fi
 check_upgrade_resources || exit 1
 echo -e "${C_BLUE}✅ --- 步骤 10 完成 ---${C_RESET}"
 echo
+
+if [[ "$INSTALL_MODE" == media ]]; then
+    write_media_image || exit 1
+    exit 0
+fi
 
 # --- 11. 询问可选参数并最终确认 ---
 echo -e "${C_BLUE}--- 步骤 11: 配置可选参数并最终确认 ---${C_RESET}"
