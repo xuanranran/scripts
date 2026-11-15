@@ -1022,12 +1022,42 @@ validate_media_mbr() {
 # 消费完整压缩流；仅保留前 512 字节，不生成完整解压镜像。
 capture_media_image_size() {
     local remainder
-    head -c 512 > "$TMP_DIR/media-mbr.bin" || return 1
-    [[ $(wc -c < "$TMP_DIR/media-mbr.bin") == 512 ]] || return 1
+    # BusyBox head 使用 stdio 缓冲，可能从管道多读但只输出 512 字节，
+    # 导致随后的 wc 少算长度。dd 按 1 字节读取 512 次，不消费后续数据。
+    if ! dd bs=1 count=512 of="$TMP_DIR/media-mbr.bin" 2> "$TMP_DIR/media-header.log"; then
+        cat "$TMP_DIR/media-header.log" >&2
+        echo '❌ 错误：无法读取完整镜像头，未写盘。' >&2
+        return 1
+    fi
+    [[ $(wc -c < "$TMP_DIR/media-mbr.bin") == 512 ]] || {
+        echo '❌ 错误：镜像头不足 512 字节，未写盘。' >&2; return 1;
+    }
     remainder=$(wc -c) || return 1
     remainder=${remainder//[[:space:]]/}
     [[ "$remainder" =~ ^[0-9]{1,12}$ ]] || return 1
     printf '%s\n' "$((remainder + 512))"
+}
+
+verify_media_readback() {
+    local image_bytes="$1" expected actual log="$TMP_DIR/media-readback.log"
+    printf '信息：读回校验范围：前 %s 字节（%s）。\n' "$image_bytes" "$(format_kib "$(((image_bytes + 1023) / 1024))")"
+    expected=$(set -o pipefail; media_image_stream | sha256sum | awk '{print $1}') || {
+        echo '❌ 错误：读取源镜像或计算 SHA256 失败，停止后续操作。' >&2; return 1;
+    }
+    actual=$(set -o pipefail; read_media_image_bytes "$image_bytes" 2> "$log" | sha256sum | awk '{print $1}') || {
+        cat "$log" >&2
+        echo '❌ 错误：目标介质读回或 SHA256 计算失败，当前启动盘未被写入。' >&2; return 1;
+    }
+    [[ "$expected" =~ ^[a-fA-F0-9]{64}$ && "$actual" =~ ^[a-fA-F0-9]{64}$ ]] || {
+        echo '❌ 错误：未取得有效的 SHA256 校验值，停止后续操作。' >&2; return 1;
+    }
+    if [[ "$expected" != "$actual" ]]; then
+        printf '镜像 SHA256：%s\n读回 SHA256：%s\n' "$expected" "$actual" >&2
+        cat "$log" >&2
+        echo '❌ 错误：目标介质写入读回校验失败，当前启动盘未被写入。' >&2
+        return 1
+    fi
+    rm -f -- "$log"
 }
 
 set_media_disk_signature() {
@@ -1282,11 +1312,7 @@ write_media_image() {
     sync || return 1
     # 写入后读回完整镜像范围，避免仅凭 dd 退出码就提示烧录成功。
     echo "信息：正在读回 $TARGET_MEDIUM 并校验完整镜像，请稍候..."
-    expected=$(set -o pipefail; media_image_stream | sha256sum | awk '{print $1}') || return 1
-    actual=$(set -o pipefail; read_media_image_bytes "$image_bytes" 2>/dev/null | sha256sum | awk '{print $1}') || return 1
-    [[ "$expected" =~ ^[a-fA-F0-9]{64}$ && "$expected" == "$actual" ]] || {
-        echo '❌ 错误：目标介质写入读回校验失败，当前启动盘未被写入。' >&2; return 1;
-    }
+    verify_media_readback "$image_bytes" || return 1
     set_media_disk_signature || { echo '❌ 错误：目标介质磁盘标识设置失败，请保留当前启动盘。' >&2; return 1; }
     if [[ -z "$SYSUPGRADE_ARGS" ]]; then
         check_inactive_mmc "$TARGET_DISK" "$TARGET_CID" "$TARGET_KIND" "$TARGET_SECTORS" || return 1
@@ -1579,6 +1605,8 @@ cleanup() {
         MEDIA_BOOT_MOUNTED=0
     fi
     rm -f -- "$TMP_DIR/media-config.tgz" "$TMP_DIR/media-mbr.bin" "$TMP_DIR/media-id.bin"
+    rm -f -- "$TMP_DIR/media-header.log"
+    [[ ${KEEP_IMAGE:-0} == 1 ]] || rm -f -- "$TMP_DIR/media-readback.log"
     rm -f -- "$TMP_DIR/emmc-erase-ram.sh" "$TMP_DIR/emmc-sd-header" "$TMP_DIR/emmc-ram-started" "$TMP_DIR/emmc-ram-complete"
     rmdir "$TMP_DIR/media-boot" 2>/dev/null || :
     for file in "${IMAGE_PATH_GZ:-}" "${IMAGE_PATH_IMG:-}" "${CHECKSUM_PATH:-}"; do
