@@ -45,9 +45,6 @@ TARGET_CID=""
 TARGET_SECTORS=0
 TARGET_KIND=""
 TARGET_MEDIUM=""
-REQUEST_EMMC_ERASE=0
-ERASE_EMMC_CID=""
-ERASE_EMMC_SECTORS=0
 PENDING_EMMC_CID=""
 PENDING_EMMC_SECTORS=0
 MEDIA_WRITE_VERIFIED=0
@@ -881,9 +878,8 @@ erase_inactive_emmc() {
 }
 
 select_install_target() {
-    local disk kind cid sectors choice has_sd=0 has_emmc=0 boot_info boot_disk target_kind target_medium answer
+    local disk kind cid sectors choice has_sd=0 has_emmc=0 boot_info boot_disk target_kind target_medium
     INSTALL_MODE=sysupgrade
-    REQUEST_EMMC_ERASE=0
     boot_disk=$(get_media_boot_disk) || return 0
     BOOT_DISK=$boot_disk
     boot_info=$(get_mmc_info "$BOOT_DISK" 2>/dev/null) || return 0
@@ -912,16 +908,6 @@ select_install_target() {
         case "$choice" in
             ''|1) return 0 ;;
             2) choose_mmc_disk "$target_kind" || return 1
-               if [[ "$target_kind" == SD ]]; then
-                   ui_section '迁移后的 eMMC 清理'
-                   ui_field '执行时机' '先完成 SD 烧录；切换到 SD 启动并确认正常后，再次运行脚本确认清空。'
-                   ui_confirm N '从 SD 启动后，整盘覆盖清空 eMMC' '保留 eMMC 全部分区和数据'
-                   read_input "$(ui_prompt N)" answer
-                   if [[ "$answer" =~ ^[Yy]$ ]]; then
-                       read -r kind ERASE_EMMC_CID ERASE_EMMC_SECTORS <<< "$boot_info"
-                       REQUEST_EMMC_ERASE=1
-                   fi
-               fi
                INSTALL_MODE=media; return 0 ;;
             3) if [[ "$boot_info" == SD\ * && "$has_emmc" == 1 ]]; then
                    access_emmc_cleanup_request load || return 1
@@ -1237,7 +1223,7 @@ write_media_image() {
         echo '❌ 错误：目标介质写入读回校验失败，当前启动盘未被写入。' >&2; return 1;
     }
     set_media_disk_signature || { echo '❌ 错误：目标介质磁盘标识设置失败，请保留当前启动盘。' >&2; return 1; }
-    if [[ -z "$SYSUPGRADE_ARGS" || "$REQUEST_EMMC_ERASE" == 1 ]]; then
+    if [[ -z "$SYSUPGRADE_ARGS" ]]; then
         check_inactive_mmc "$TARGET_DISK" "$TARGET_CID" "$TARGET_KIND" "$TARGET_SECTORS" || return 1
         partx -d - "/dev/$TARGET_DISK" && partx -a - "/dev/$TARGET_DISK" || return 1
         info=$(get_mmc_info "$TARGET_DISK") || return 1
@@ -1245,26 +1231,19 @@ write_media_image() {
         mkdir -p "$mount_dir" || return 1
         mount -o rw,noatime "/dev/${TARGET_DISK}p1" "$mount_dir" || return 1
         MEDIA_BOOT_MOUNTED=1
-        if [[ -z "$SYSUPGRADE_ARGS" ]]; then
-            available=$(set -o pipefail; df -Pk "$mount_dir" | awk 'END {print $4}') || return 1
-            required=$(wc -c < "$backup") || return 1
-            [[ "$available" =~ ^[0-9]+$ ]] && ((available >= (required + 1023) / 1024 + 1024)) || {
-                echo '❌ 错误：目标启动分区无法容纳配置备份；请保留当前启动盘。' >&2; return 1;
-            }
-            cp -f -- "$backup" "$mount_dir/sysupgrade.tgz" || return 1
-            expected=$(set -o pipefail; sha256sum "$backup" | awk '{print $1}') || return 1
-            actual=$(set -o pipefail; sha256sum "$mount_dir/sysupgrade.tgz" | awk '{print $1}') || return 1
-            [[ "$expected" =~ ^[a-fA-F0-9]{64}$ && "$expected" == "$actual" ]] || return 1
-        fi
-        if [[ "$REQUEST_EMMC_ERASE" == 1 && "$TARGET_KIND" == SD ]]; then
-            [[ "$ERASE_EMMC_CID" =~ ^[a-fA-F0-9]{32}$ && "$ERASE_EMMC_SECTORS" =~ ^[1-9][0-9]{0,11}$ ]] || return 1
-            printf '%s %s\n' "$ERASE_EMMC_CID" "$ERASE_EMMC_SECTORS" > "$mount_dir/openwrt-upgrade-emmc-cleanup" || return 1
-        fi
+        available=$(set -o pipefail; df -Pk "$mount_dir" | awk 'END {print $4}') || return 1
+        required=$(wc -c < "$backup") || return 1
+        [[ "$available" =~ ^[0-9]+$ ]] && ((available >= (required + 1023) / 1024 + 1024)) || {
+            echo '❌ 错误：目标启动分区无法容纳配置备份；请保留当前启动盘。' >&2; return 1;
+        }
+        cp -f -- "$backup" "$mount_dir/sysupgrade.tgz" || return 1
+        expected=$(set -o pipefail; sha256sum "$backup" | awk '{print $1}') || return 1
+        actual=$(set -o pipefail; sha256sum "$mount_dir/sysupgrade.tgz" | awk '{print $1}') || return 1
+        [[ "$expected" =~ ^[a-fA-F0-9]{64}$ && "$expected" == "$actual" ]] || return 1
         sync && umount "$mount_dir" || return 1
         MEDIA_BOOT_MOUNTED=0
         rmdir "$mount_dir" || return 1
-        [[ -n "$SYSUPGRADE_ARGS" ]] || echo '✅ 信息：配置备份已放入目标启动分区，供新系统首次启动恢复。'
-        [[ "$REQUEST_EMMC_ERASE" != 1 ]] || echo '✅ 信息：已记录 eMMC 清理请求；从 SD 启动后再次运行脚本，选择清空 eMMC 并确认。'
+        echo '✅ 信息：配置备份已放入目标启动分区，供新系统首次启动恢复。'
     fi
     echo "✅ 信息：$TARGET_MEDIUM 整盘烧录及读回校验完成，当前启动盘未被写入。"
     MEDIA_WRITE_VERIFIED=1
