@@ -53,6 +53,7 @@ SOURCE_EMMC_CID=""
 SOURCE_EMMC_SECTORS=0
 EMMC_RAMFS_ROOT=""
 EMMC_HANDOFF_PENDING=0
+OD_COMMAND=(od)
 MEDIA_BOOT_MOUNTED=0
 
 # 动态文件名（将在检测型号和Docker选择后生成）
@@ -565,6 +566,70 @@ check_dependencies() {
     fi
 }
 
+# BusyBox 精简版 od 可能存在但不支持 -A/-t/-j/-N，必须实测本脚本使用的格式。
+od_supports_media_options() {
+    local hex decimal
+    hex=$(set -o pipefail; printf '\000\125\252\377' | "$@" -An -tx1 -j 1 -N 2 2>/dev/null) || return 1
+    decimal=$(set -o pipefail; printf '\000\125\252\377' | "$@" -An -tu1 -j 3 -N 1 2>/dev/null) || return 1
+    [[ "${hex//[[:space:]]/}" == 55aa && "${decimal//[[:space:]]/}" == 255 ]]
+}
+
+prepare_media_od() {
+    if command -v od >/dev/null 2>&1 && od_supports_media_options od; then
+        OD_COMMAND=(od)
+    elif command -v busybox >/dev/null 2>&1 && od_supports_media_options busybox od; then
+        OD_COMMAND=(busybox od)
+    else
+        return 1
+    fi
+}
+
+media_od() { "${OD_COMMAND[@]}" "$@"; }
+
+# 只为介质操作准备额外依赖，原地 sysupgrade 不要求安装烧录工具。
+check_media_dependencies() {
+    local mode="${1:-flash}" show_result="${2:-1}" cmd package manager action
+    local -a required=(dd partx mount umount) missing=()
+    [[ "$mode" == flash || "$mode" == erase ]] || return 1
+    for cmd in "${required[@]}"; do
+        command -v "$cmd" >/dev/null 2>&1 && continue
+        case "$cmd" in
+            dd) package=coreutils-dd ;;
+            partx) package=partx-utils ;;
+            mount|umount) package=mount-utils ;;
+        esac
+        [[ " ${missing[*]} " == *" $package "* ]] || missing+=("$package")
+    done
+    if [[ "$mode" == flash ]] && ! prepare_media_od; then
+        missing+=(coreutils-od)
+    fi
+    if ((${#missing[@]})); then
+        if command -v opkg >/dev/null 2>&1; then manager=opkg; action=install
+        elif command -v apk >/dev/null 2>&1; then manager=apk; action=add
+        else
+            printf '❌ 错误：介质操作需要 %s，但未找到 opkg/apk，未写盘。\n' "${missing[*]}" >&2
+            return 1
+        fi
+        printf '信息：正在安装介质操作依赖：%s...\n' "${missing[*]}"
+        "$manager" update || echo '警告：软件包列表更新失败，仍尝试安装。' >&2
+        "$manager" "$action" "${missing[@]}" || {
+            echo '❌ 错误：介质操作依赖安装失败，停止操作，未写盘。' >&2; return 1;
+        }
+        hash -r
+    fi
+    for cmd in "${required[@]}"; do
+        command -v "$cmd" >/dev/null 2>&1 || {
+            printf '❌ 错误：安装后仍缺少工具 %s，未写盘。\n' "$cmd" >&2; return 1;
+        }
+    done
+    if [[ "$mode" == flash ]] && ! prepare_media_od; then
+        echo '❌ 错误：仍缺少兼容的 od（需要 coreutils-od），停止操作，未写盘。' >&2
+        return 1
+    fi
+    [[ "$show_result" != 1 ]] || echo '✅ 信息：介质操作工具检查通过。'
+    return 0
+}
+
 # --- 选择 GitHub 访问方式 ---
 select_github_access() {
     ui_section 'GitHub 访问方式'
@@ -908,8 +973,10 @@ select_install_target() {
         case "$choice" in
             ''|1) return 0 ;;
             2) choose_mmc_disk "$target_kind" || return 1
+               check_media_dependencies flash || return 1
                INSTALL_MODE=media; return 0 ;;
             3) if [[ "$boot_info" == SD\ * && "$has_emmc" == 1 ]]; then
+                   check_media_dependencies erase || return 1
                    access_emmc_cleanup_request load || return 1
                    choose_mmc_disk MMC "$PENDING_EMMC_CID" && erase_inactive_emmc || return 1
                    exit 0
@@ -941,10 +1008,10 @@ read_media_image_bytes() {
 validate_media_mbr() {
     local header="$TMP_DIR/media-mbr.bin" magic part_type offset
     [[ $(wc -c < "$header") == 512 ]] || return 1
-    magic=$(od -An -tx1 -j 510 -N 2 "$header") || return 1
+    magic=$(media_od -An -tx1 -j 510 -N 2 "$header") || return 1
     [[ "${magic//[[:space:]]/}" == 55aa ]] || return 1
     for offset in 450 466 482 498; do
-        part_type=$(od -An -tu1 -j "$offset" -N 1 "$header") || return 1
+        part_type=$(media_od -An -tu1 -j "$offset" -N 1 "$header") || return 1
         if [[ "${part_type//[[:space:]]/}" == 238 ]]; then
             echo '❌ 错误：当前介质烧录模式仅支持本项目的 MBR 镜像，不修改 GPT 磁盘。' >&2
             return 1
@@ -969,13 +1036,13 @@ set_media_disk_signature() {
     check_inactive_mmc "$TARGET_DISK" "$TARGET_CID" "$TARGET_KIND" "$TARGET_SECTORS" || return 1
     dd if="/dev/$TARGET_DISK" of="$header" bs=512 count=1 || return 1
     validate_media_mbr || return 1
-    original=$(od -An -tx1 -j 440 -N 4 "$header") || return 1
-    boot_signature=$(set -o pipefail; dd if="/dev/$BOOT_DISK" bs=1 skip=440 count=4 | od -An -tx1) || return 1
+    original=$(media_od -An -tx1 -j 440 -N 4 "$header") || return 1
+    boot_signature=$(set -o pipefail; dd if="/dev/$BOOT_DISK" bs=1 skip=440 count=4 | media_od -An -tx1) || return 1
     original=${original//[[:space:]]/}; boot_signature=${boot_signature//[[:space:]]/}
     [[ "$original" =~ ^[a-f0-9]{8}$ && "$boot_signature" =~ ^[a-f0-9]{8}$ ]] || return 1
     for attempt in 1 2 3 4; do
         dd if=/dev/urandom of="$signature_file" bs=4 count=1 || return 1
-        signature=$(od -An -tx1 "$signature_file") || return 1
+        signature=$(media_od -An -tx1 "$signature_file") || return 1
         signature=${signature//[[:space:]]/}
         [[ "$signature" =~ ^[a-f0-9]{8}$ && "$signature" != 00000000 &&
             "$signature" != "$original" && "$signature" != "$boot_signature" ]] && break
@@ -984,7 +1051,7 @@ set_media_disk_signature() {
         "$signature" != "$original" && "$signature" != "$boot_signature" ]] || return 1
     check_inactive_mmc "$TARGET_DISK" "$TARGET_CID" "$TARGET_KIND" "$TARGET_SECTORS" || return 1
     dd if="$signature_file" of="/dev/$TARGET_DISK" bs=1 seek=440 count=4 conv=notrunc,fsync || return 1
-    actual=$(set -o pipefail; dd if="/dev/$TARGET_DISK" bs=1 skip=440 count=4 | od -An -tx1) || return 1
+    actual=$(set -o pipefail; dd if="/dev/$TARGET_DISK" bs=1 skip=440 count=4 | media_od -An -tx1) || return 1
     [[ "${actual//[[:space:]]/}" == "$signature" ]] || return 1
     echo '✅ 信息：已设置目标介质的独立磁盘标识，避免与当前启动盘的分区 UUID 冲突。'
 }
@@ -1183,9 +1250,7 @@ write_media_image() {
     MEDIA_WRITE_VERIFIED=0
     SOURCE_EMMC_DISK=""
     [[ "$TARGET_KIND" == SD || "$TARGET_KIND" == MMC ]] || return 1
-    for cmd in dd partx mount umount od; do
-        command -v "$cmd" >/dev/null 2>&1 || { echo "❌ 缺少烧录工具：$cmd" >&2; return 1; }
-    done
+    check_media_dependencies flash 0 || return 1
     check_inactive_mmc "$TARGET_DISK" "$TARGET_CID" "$TARGET_KIND" "$TARGET_SECTORS" || return 1
     if [[ "$TARGET_KIND" == SD ]]; then
         source_boot=$(get_media_boot_disk) || return 1
