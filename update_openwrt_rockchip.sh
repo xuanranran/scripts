@@ -50,6 +50,12 @@ ERASE_EMMC_CID=""
 ERASE_EMMC_SECTORS=0
 PENDING_EMMC_CID=""
 PENDING_EMMC_SECTORS=0
+MEDIA_WRITE_VERIFIED=0
+SOURCE_EMMC_DISK=""
+SOURCE_EMMC_CID=""
+SOURCE_EMMC_SECTORS=0
+EMMC_RAMFS_ROOT=""
+EMMC_HANDOFF_PENDING=0
 MEDIA_BOOT_MOUNTED=0
 
 # 动态文件名（将在检测型号和Docker选择后生成）
@@ -997,13 +1003,212 @@ set_media_disk_signature() {
     echo '✅ 信息：已设置目标介质的独立磁盘标识，避免与当前启动盘的分区 UUID 冲突。'
 }
 
+# RAM 中使用 POSIX sh，避免依赖原 eMMC 上的 Bash、程序或共享库。
+write_emmc_ram_worker() {
+    cat > "$TMP_DIR/emmc-erase-ram.sh" <<'EMMC_RAM_WORKER'
+#!/bin/sh
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+fail() { echo "❌ 错误：$*；停止清空 eMMC。" >&2; exit 1; }
+valid_disk() {
+    case "$1" in mmcblk*) rest=${1#mmcblk} ;; *) return 1 ;; esac
+    case "$rest" in ''|*[!0-9]*) return 1 ;; esac
+}
+valid_cid() { [ "${#1}" -eq 32 ] || return 1; case "$1" in *[!a-fA-F0-9]*) return 1 ;; esac; }
+valid_size() { case "$1" in ''|0*|*[!0-9]*) return 1 ;; esac; [ "${#1}" -le 12 ]; }
+identity() {
+    [ -b "/dev/$1" ] &&
+        [ "$(cat "/sys/class/block/$1/device/type")" = "$2" ] &&
+        [ "$(cat "/sys/class/block/$1/device/cid")" = "$3" ] &&
+        [ "$(cat "/sys/class/block/$1/size")" = "$4" ]
+}
+guard() {
+    # 必须真正 pivot 到内存根目录，不能只把脚本放进 /tmp。
+    awk '$5 == "/" { for (i=6; i<=NF; i++) if ($i == "-") {
+        if ($3 ~ /^0:/ && $(i+1) ~ /^(tmpfs|ramfs|rootfs)$/) ok=1; break
+    }} END {exit !ok}' /proc/self/mountinfo || fail '尚未进入内存根文件系统'
+    identity "$emmc" MMC "$emmc_cid" "$emmc_sectors" || fail 'eMMC 身份或容量不匹配'
+    identity "$sd" SD "$sd_cid" "$sd_sectors" || fail 'SD 卡已移除、更换或容量发生变化'
+    # 包括 swap 文件；交接前关闭，交接后必须确认没有任何活动 swap。
+    awk 'NR > 1 {busy=1} END {print busy+0}' /proc/swaps > "$work/ram-swap-state" || fail '无法读取 swap 状态'
+    [ "$(cat "$work/ram-swap-state")" = 0 ] || fail '仍有活动 swap'
+    for entry in "/sys/class/block/$emmc/dev" "/sys/class/block/$emmc/$emmc"p*/dev; do
+        [ -e "$entry" ] || continue
+        number=$(cat "$entry") || fail '无法读取块设备号'
+        printf '%s\n' "$number" | grep -Eq '^[0-9]+:[0-9]+$' || fail '块设备号无效'
+        awk -v device="$number" '$3 == device {busy=1} END {print busy+0}' /proc/self/mountinfo > "$work/ram-mount-state" || fail '无法读取挂载状态'
+        [ "$(cat "$work/ram-mount-state")" = 0 ] || fail 'eMMC 仍有挂载分区'
+    done
+    [ -r "/sys/class/block/$emmc/dev" ] || fail 'eMMC 设备号不存在'
+    for entry in "/sys/class/block/$emmc/holders/"* "/sys/class/block/$emmc/$emmc"p*/holders/*; do
+        [ ! -e "$entry" ] && [ ! -L "$entry" ] || fail 'eMMC 仍被其他块设备使用'
+    done
+    for entry in /sys/class/block/loop*/loop/backing_file; do
+        [ -f "$entry" ] || continue
+        backing=$(cat "$entry") || fail '无法读取 loop 设备状态'
+        [ -z "$backing" ] || fail '仍有活动 loop 设备'
+    done
+}
+[ "$#" -eq 8 ] || fail '内存清理参数不完整'
+emmc=$1; emmc_cid=$2; emmc_sectors=$3; sd=$4; sd_cid=$5; sd_sectors=$6; sd_hash=$7; work=$8
+valid_disk "$emmc" && valid_disk "$sd" && [ "$emmc" != "$sd" ] || fail '目标设备名无效'
+valid_cid "$emmc_cid" && valid_cid "$sd_cid" && valid_size "$emmc_sectors" && valid_size "$sd_sectors" || fail '设备标识或容量无效'
+case "$work" in /tmp/openwrt-upgrade.??????) ;; *) fail '临时目录无效' ;; esac
+[ -d "$work" ] && [ ! -L "$work" ] || fail '临时目录不存在'
+[ "${#sd_hash}" -eq 64 ] || fail 'SD 校验值无效'
+case "$sd_hash" in *[!a-f0-9]*) fail 'SD 校验值无效' ;; esac
+guard
+dd if="/dev/$sd" of="$work/ram-sd-header" bs=512 count=1 || fail '无法读取 SD 启动扇区'
+[ "$(wc -c < "$work/ram-sd-header")" -eq 512 ] || fail 'SD 启动扇区不完整'
+actual=$(sha256sum "$work/ram-sd-header") || fail 'SD 校验失败'
+[ "${actual%% *}" = "$sd_hash" ] || fail 'SD 启动扇区在交接期间发生变化'
+guard
+printf 'started\n' > "$work/emmc-ram-started" || fail '无法记录清理状态'
+echo '信息：已进入内存运行环境，正在整盘写零清空 eMMC，请保持通电...'
+blocks=$((emmc_sectors / 2048)); tail_sectors=$((emmc_sectors % 2048))
+dd if=/dev/zero of="/dev/$emmc" bs=1M count="$blocks" conv=fsync || fail 'eMMC 写零失败'
+if [ "$tail_sectors" -gt 0 ]; then
+    dd if=/dev/zero of="/dev/$emmc" bs=512 seek="$((blocks * 2048))" count="$tail_sectors" conv=notrunc,fsync || fail 'eMMC 尾部写零失败'
+fi
+sync || fail 'eMMC 同步失败'
+# 删除延后清理标记，不改动 SD 上的系统和配置备份。
+mkdir -p "$work/ram-sd-boot" || fail '无法准备 SD 挂载目录'
+if mount -o rw,noatime "/dev/${sd}p1" "$work/ram-sd-boot"; then
+    rm -f "$work/ram-sd-boot/openwrt-upgrade-emmc-cleanup" || echo '警告：清理请求标记删除失败。' >&2
+    sync
+    umount "$work/ram-sd-boot" || echo '警告：SD 启动分区卸载失败。' >&2
+else
+    echo '警告：eMMC 已清空，但未能删除 SD 中的延后清理标记。' >&2
+fi
+printf 'complete\n' > "$work/emmc-ram-complete"
+echo '✅ 信息：eMMC 用户区整盘覆盖完成，即将重启，请等待设备从 SD 启动。'
+# /sbin/upgraded（PID 1）在此程序退出后负责重启，不再次执行固件刷写。
+exit 0
+EMMC_RAM_WORKER
+}
+
+release_emmc_ramfs() {
+    if [[ "$EMMC_HANDOFF_PENDING" == 0 && "$EMMC_RAMFS_ROOT" == /tmp/root &&
+          ! -L /tmp/root && -f /tmp/root/.emmc-erase-owner &&
+          $(cat /tmp/root/.emmc-erase-owner) == "$$:$TMP_DIR" ]]; then
+        rm -rf -- /tmp/root || return 1
+        EMMC_RAMFS_ROOT=""
+    fi
+}
+
+prepare_emmc_ramfs() {
+    # 按原生 sysupgrade 准备 upgraded 及共享库；不改动系统的升级脚本。
+    EMMC_RAMFS_ROOT=/tmp/root
+    sh -c '
+        . /lib/functions.sh || exit 1
+        include /lib/upgrade
+        [ "$RAM_ROOT" = /tmp/root ] || exit 1
+        if type platform_pre_upgrade >/dev/null 2>&1; then
+            echo "❌ 当前系统存在额外的升级前钩子，不执行立即清理。" >&2; exit 1
+        fi
+        mkdir "$RAM_ROOT" || exit 1
+        printf "%s\n" "$1" > "$RAM_ROOT/.emmc-erase-owner" || exit 1
+        install_bin /sbin/upgraded
+        hashbin=$(command -v sha256sum) || exit 1
+        install_bin "$hashbin"
+        [ -x "$RAM_ROOT/sbin/upgraded" ] && [ -x "$RAM_ROOT$hashbin" ]
+    ' sh "$$:$TMP_DIR" || { release_emmc_ramfs; return 1; }
+}
+
+start_emmc_ram_handoff() {
+    local boot info filesystem swap_used header_hash command payload reply status=0 cmd interface
+    [[ "$MEDIA_WRITE_VERIFIED" == 1 && "$TARGET_KIND" == SD && -n "$SOURCE_EMMC_DISK" ]] || return 1
+    boot=$(get_media_boot_disk) || return 1
+    [[ "$boot" == "$SOURCE_EMMC_DISK" ]] || return 1
+    info=$(get_mmc_info "$boot") || return 1
+    [[ "$info" == "MMC $SOURCE_EMMC_CID $SOURCE_EMMC_SECTORS" ]] || return 1
+    check_inactive_mmc "$TARGET_DISK" "$TARGET_CID" SD "$TARGET_SECTORS" || return 1
+    [[ "$TMP_DIR" =~ ^/tmp/openwrt-upgrade\.[a-zA-Z0-9]{6}$ ]] || return 1
+    for cmd in ubus swapoff sha256sum; do
+        command -v "$cmd" >/dev/null 2>&1 || { echo "❌ 缺少内存交接工具：$cmd" >&2; return 1; }
+    done
+    [[ -x /sbin/upgraded && -x /lib/upgrade/stage2 && -x /bin/busybox ]] || return 1
+    # 只接受已知的原生 stage2 自定义命令接口，兼容性不明时不交接。
+    grep -Eq '^COMMAND="?\$2"?$' /lib/upgrade/stage2 &&
+        grep -q 'switch_to_ramfs' /lib/upgrade/stage2 &&
+        grep -q '^exec /bin/busybox ash -c "\$COMMAND"' /lib/upgrade/stage2 || return 1
+    interface=$(ubus -v list system) || return 1
+    [[ "$interface" == *'"sysupgrade"'* && "$interface" == *'"command"'* ]] || return 1
+    filesystem=$(set -o pipefail; df -PkT /tmp | awk 'END {print $2}') || return 1
+    [[ "$filesystem" == tmpfs || "$filesystem" == ramfs ]] || return 1
+    swap_used=$(awk '/^SwapTotal:/ {total=$2; have_total=1} /^SwapFree:/ {free=$2; have_free=1}
+        END {if (have_total && have_free && total >= free) print total-free; else exit 1}' /proc/meminfo) || return 1
+    [[ "$swap_used" =~ ^[0-9]+$ ]] || return 1
+    check_available_resources "$swap_used" '内存交接（含 swap 回迁）' || return 1
+    write_emmc_ram_worker || return 1
+    /bin/sh -n "$TMP_DIR/emmc-erase-ram.sh" || return 1
+    dd if="/dev/$TARGET_DISK" of="$TMP_DIR/emmc-sd-header" bs=512 count=1 || return 1
+    [[ $(wc -c < "$TMP_DIR/emmc-sd-header") == 512 ]] || return 1
+    header_hash=$(sha256sum "$TMP_DIR/emmc-sd-header") || return 1
+    header_hash=${header_hash%% *}
+    [[ "$header_hash" =~ ^[a-f0-9]{64}$ ]] || return 1
+    prepare_emmc_ramfs || return 1
+    # swap 文件必须在旧根目录仍可访问时关闭，RAM 程序还会再次核实。
+    swapoff -a || { release_emmc_ramfs; return 1; }
+    [[ $(awk 'NR>1 {n++} END {print n+0}' /proc/swaps) == 0 ]] || { release_emmc_ramfs; return 1; }
+    printf -v command "/bin/sh '%s/emmc-erase-ram.sh' '%s' '%s' '%s' '%s' '%s' '%s' '%s' '%s'" \
+        "$TMP_DIR" "$SOURCE_EMMC_DISK" "$SOURCE_EMMC_CID" "$SOURCE_EMMC_SECTORS" \
+        "$TARGET_DISK" "$TARGET_CID" "$TARGET_SECTORS" "$header_hash" "$TMP_DIR"
+    payload=$(jq -cn --arg prefix "$EMMC_RAMFS_ROOT" --arg path "$IMAGE_PATH" --arg command "$command" \
+        '{prefix:$prefix,path:$path,command:$command,force:true,options:{}}') || { release_emmc_ramfs; return 1; }
+    echo '信息：正在交接到内存维护环境；SSH 将断开，清空和重启由系统继续执行，请勿重复操作。'
+    # 交接一旦发出，就不能让 EXIT trap 删除 RAM 程序或原生升级环境。
+    EMMC_HANDOFF_PENDING=1
+    reply=$(ubus call system sysupgrade "$payload" 2>&1) || status=$?
+    if jq -e 'type == "object" and has("error")' <<< "$reply" >/dev/null 2>&1; then
+        printf '❌ 内存交接失败（退出码 %s）：%s\n' "$status" "$reply" >&2
+        # procd 在停服务之前给出的明确拒绝，才可释放尚未使用的 RAM 环境。
+        EMMC_HANDOFF_PENDING=0
+        release_emmc_ramfs
+        return 1
+    fi
+    if ((status != 0)) && [[ "$reply" != *'Connection failed'* ]]; then
+        printf '❌ 内存交接返回异常（退出码 %s）：%s；请勿重复操作。\n' "$status" "$reply" >&2
+        return 1
+    fi
+    [[ -z "$reply" || "$reply" == *'Connection failed'* ]] || printf '%s\n' "$reply"
+    echo '信息：已发出内存交接请求，请等待设备重启；只有内存环境中的安全检查通过后才会清空 eMMC。'
+}
+
+offer_immediate_emmc_erase() {
+    local answer
+    [[ "$MEDIA_WRITE_VERIFIED" == 1 && "$TARGET_KIND" == SD && -n "$SOURCE_EMMC_DISK" ]] || return 0
+    ui_section 'SD 烧录成功后的 eMMC 清理' "$C_B_YELLOW"
+    ui_field '清理目标' "/dev/$SOURCE_EMMC_DISK（原 eMMC 启动盘，整盘写零）"
+    ui_field '执行方式' '停止服务并切换到内存环境，解除 eMMC 占用后再清空，然后重启。'
+    ui_field '注意' 'SD 尚未经过实际启动验证；清空后无法再回退到原 eMMC 系统。'
+    ui_confirm N '立即进入内存环境，清空 eMMC 并重启' '不立即清空，保留 eMMC'
+    read_input "$(ui_prompt N)" answer
+    [[ "$answer" =~ ^[Yy]$ ]] || return 0
+    read_input "请输入原 eMMC 完整设备名 /dev/$SOURCE_EMMC_DISK 确认，其他输入取消：" answer
+    [[ "$answer" == "/dev/$SOURCE_EMMC_DISK" ]] || { echo '操作已取消，eMMC 保持不变。'; return 0; }
+    start_emmc_ram_handoff || {
+        echo '❌ 内存交接未确认完成；不在当前 eMMC 系统中直接清空、不自动重试，请检查上方错误和设备控制台。' >&2
+        return 1
+    }
+}
+
 write_media_image() {
-    local image_bytes backup="$TMP_DIR/media-config.tgz" mount_dir="$TMP_DIR/media-boot" info available required expected actual cmd
+    local image_bytes backup="$TMP_DIR/media-config.tgz" mount_dir="$TMP_DIR/media-boot" info available required expected actual cmd source_boot
+    MEDIA_WRITE_VERIFIED=0
+    SOURCE_EMMC_DISK=""
     [[ "$TARGET_KIND" == SD || "$TARGET_KIND" == MMC ]] || return 1
     for cmd in dd partx mount umount od; do
         command -v "$cmd" >/dev/null 2>&1 || { echo "❌ 缺少烧录工具：$cmd" >&2; return 1; }
     done
     check_inactive_mmc "$TARGET_DISK" "$TARGET_CID" "$TARGET_KIND" "$TARGET_SECTORS" || return 1
+    if [[ "$TARGET_KIND" == SD ]]; then
+        source_boot=$(get_media_boot_disk) || return 1
+        info=$(get_mmc_info "$source_boot") || return 1
+        if [[ "$info" == MMC\ * ]]; then
+            SOURCE_EMMC_DISK=$source_boot
+            read -r cmd SOURCE_EMMC_CID SOURCE_EMMC_SECTORS <<< "$info"
+        fi
+    fi
     echo '信息：正在计算完整镜像大小并检查目标容量，不生成完整解压镜像...'
     image_bytes=$(set -o pipefail; media_image_stream | capture_media_image_size) || return 1
     image_bytes=${image_bytes//[[:space:]]/}
@@ -1062,6 +1267,9 @@ write_media_image() {
         [[ "$REQUEST_EMMC_ERASE" != 1 ]] || echo '✅ 信息：已记录 eMMC 清理请求；从 SD 启动后再次运行脚本，选择清空 eMMC 并确认。'
     fi
     echo "✅ 信息：$TARGET_MEDIUM 整盘烧录及读回校验完成，当前启动盘未被写入。"
+    MEDIA_WRITE_VERIFIED=1
+    offer_immediate_emmc_erase || return 1
+    [[ "$EMMC_HANDOFF_PENDING" != 1 ]] || return 0
     echo "信息：请切换到 $TARGET_MEDIUM 启动，确认新系统及配置正常。"
     if [[ "$TARGET_KIND" == SD ]]; then
         echo '信息：若需清空 eMMC，从 SD 启动后再次运行本脚本，选择清空未使用的 eMMC。'
@@ -1320,11 +1528,14 @@ cleanup_old_upgrade_dirs() {
 # --- 退出脚本时清理本次任务的临时文件 ---
 cleanup() {
     local file
+    [[ "$EMMC_HANDOFF_PENDING" != 1 ]] || return 0
+    release_emmc_ramfs || return 1
     if [[ "$MEDIA_BOOT_MOUNTED" == 1 ]]; then
         umount "$TMP_DIR/media-boot" || { echo '警告：目标启动分区仍被挂载，请手动卸载。' >&2; return 1; }
         MEDIA_BOOT_MOUNTED=0
     fi
     rm -f -- "$TMP_DIR/media-config.tgz" "$TMP_DIR/media-mbr.bin" "$TMP_DIR/media-id.bin"
+    rm -f -- "$TMP_DIR/emmc-erase-ram.sh" "$TMP_DIR/emmc-sd-header" "$TMP_DIR/emmc-ram-started" "$TMP_DIR/emmc-ram-complete"
     rmdir "$TMP_DIR/media-boot" 2>/dev/null || :
     for file in "${IMAGE_PATH_GZ:-}" "${IMAGE_PATH_IMG:-}" "${CHECKSUM_PATH:-}"; do
         if [[ -n "$file" ]]; then
