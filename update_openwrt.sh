@@ -16,6 +16,7 @@ if [[ -f ${BASH_SOURCE[0]} ]]; then
 fi
 X86_SCRIPT="${SCRIPT_DIR:+$SCRIPT_DIR/}update_openwrt_x86.sh"
 ROCKCHIP_SCRIPT="${SCRIPT_DIR:+$SCRIPT_DIR/}update_openwrt_rockchip.sh"
+ROCKCHIP_MEDIA_SCRIPT="${SCRIPT_DIR:+$SCRIPT_DIR/}update_openwrt_rockchip_media.sh"
 REMOTE_BASE_URL="https://raw.githubusercontent.com/xuanranran/scripts/main"
 BOOTSTRAP_DIR=""
 
@@ -95,6 +96,52 @@ detect_platform() {
   return 1
 }
 
+# 只识别实际存在的 SD/eMMC 用户区整盘，忽略分区、boot0/boot1 和 rpmb。
+# 入口只负责提供脚本选择；写盘前的启动盘、身份和占用检查由介质脚本完成。
+has_sd_and_emmc() {
+  local path disk kind has_sd=0 has_emmc=0
+  for path in /sys/class/block/mmcblk*; do
+    disk=${path##*/}
+    [[ "$disk" =~ ^mmcblk[0-9]+$ && -b "/dev/$disk" ]] || continue
+    kind=$(cat "$path/device/type" 2>/dev/null) || continue
+    case "$kind" in
+      SD) has_sd=1 ;;
+      MMC) has_emmc=1 ;;
+    esac
+    [[ "$has_sd" != 1 || "$has_emmc" != 1 ]] || return 0
+  done
+  return 1
+}
+
+select_rockchip_script() {
+  local choice
+  SELECTED_ROCKCHIP_SCRIPT="$ROCKCHIP_SCRIPT"
+  SELECTED_ROCKCHIP_REMOTE=update_openwrt_rockchip.sh
+  has_sd_and_emmc || return 0
+  printf '\n\033[1;33m检测到 SD 卡和 eMMC，请选择脚本\033[0m\n\n'
+  printf '  1) 原升级脚本（默认）\n     使用 sysupgrade 升级当前系统\n\n'
+  printf '  2) SD/eMMC 双向烧录脚本\n     仅支持 SD 卡烧录到 eMMC，或 eMMC 烧录到 SD 卡\n\n'
+  printf '  q) 取消操作\n\n'
+  while true; do
+    printf '\033[1;33m❓ 请选择 [1/2/q]（默认：1）：\033[0m'
+    if ! IFS= read -r choice; then
+      printf '\n输入已结束，操作取消。\n' >&2
+      return 1
+    fi
+    printf '\n'
+    case "${choice:-1}" in
+      1) return 0 ;;
+      2)
+        SELECTED_ROCKCHIP_SCRIPT="$ROCKCHIP_MEDIA_SCRIPT"
+        SELECTED_ROCKCHIP_REMOTE=update_openwrt_rockchip_media.sh
+        return 0
+        ;;
+      q|Q) echo '操作已取消。'; return 1 ;;
+      *) echo '无效选项，请输入 1、2 或 q。' ;;
+    esac
+  done
+}
+
 platform="$(detect_platform)"
 case "$platform" in
   x86)
@@ -107,12 +154,13 @@ case "$platform" in
     exit "$status"
     ;;
   rockchip)
-    if [[ -n "$SCRIPT_DIR" && -f "$ROCKCHIP_SCRIPT" ]]; then
-      exec bash "$ROCKCHIP_SCRIPT" "$@"
+    select_rockchip_script || exit 0
+    if [[ -n "$SCRIPT_DIR" && -f "$SELECTED_ROCKCHIP_SCRIPT" ]]; then
+      exec bash "$SELECTED_ROCKCHIP_SCRIPT" "$@"
     fi
-    echo "Info: local script not found, trying remote update_openwrt_rockchip.sh ..." >&2
+    echo "Info: local script not found, trying remote $SELECTED_ROCKCHIP_REMOTE ..." >&2
     status=0
-    fetch_and_exec "update_openwrt_rockchip.sh" "$@" || status=$?
+    fetch_and_exec "$SELECTED_ROCKCHIP_REMOTE" "$@" || status=$?
     exit "$status"
     ;;
   *)
