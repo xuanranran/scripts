@@ -874,7 +874,7 @@ confirm_media_write() {
     ui_field '目标整盘' "/dev/$TARGET_DISK"
     ui_field '容量' "$(format_kib "$((TARGET_SECTORS / 2))")"
     ui_field '设备标识' "$TARGET_CID"
-    ui_field '注意' '目标整盘的所有分区和数据都将被覆盖，此操作不可撤销。'
+    ui_field '注意' '目标整盘的所有分区和数据都将丢失，此操作不可撤销。'
     ui_field '当前启动盘' "/dev/$BOOT_DISK（不会写入）"
     read_input "请输入完整设备名 /dev/$TARGET_DISK 确认，其他输入取消：" answer
     [[ "$answer" == "/dev/$TARGET_DISK" ]] || { echo '操作已取消，未写入目标介质。'; return 1; }
@@ -915,9 +915,53 @@ access_emmc_cleanup_request() {
     return "$result"
 }
 
+# 快速清理是可选能力；安装失败不影响原来的整盘写零。
+prepare_emmc_discard() {
+    local manager action
+    command -v blkdiscard >/dev/null 2>&1 && return 0
+    if command -v opkg >/dev/null 2>&1; then manager=opkg; action=install
+    elif command -v apk >/dev/null 2>&1; then manager=apk; action=add
+    else echo '提示：未找到 blkdiscard，将使用原来的整盘写零方式。'; return 0
+    fi
+    echo '信息：正在准备 blkdiscard 快速清理工具...'
+    "$manager" update || echo '警告：软件包列表更新失败，仍尝试安装 blkdiscard。' >&2
+    if ! "$manager" "$action" blkdiscard; then
+        echo '警告：blkdiscard 安装失败，将使用原来的整盘写零方式。' >&2
+    fi
+    hash -r
+    if ! command -v blkdiscard >/dev/null 2>&1; then
+        echo '提示：blkdiscard 不可用，将使用原来的整盘写零方式。'
+    fi
+    return 0
+}
+
+# 同一份 POSIX helper 也复制到 RAM 程序：0=已清理，2=不支持/无工具，1=真实错误。
+try_emmc_discard() {
+    (
+        command -v blkdiscard >/dev/null 2>&1 || return 2
+        echo '信息：正在使用 blkdiscard 快速清除 eMMC 用户区，请保持通电...'
+        discard_status=0
+        LC_ALL=C blkdiscard "/dev/$1" > "$2/emmc-discard.log" 2>&1 || discard_status=$?
+        if [ "$discard_status" -eq 0 ]; then
+            cat "$2/emmc-discard.log"
+            echo '✅ 信息：blkdiscard 快速清除完成（不保证逐字节为零）。'
+            return 0
+        fi
+        cat "$2/emmc-discard.log" >&2
+        # util-linux 2.39 起用退出码 2 表示不支持；兼容旧版的英文错误信息。
+        if [ "$discard_status" -eq 2 ] ||
+            { [ "$discard_status" -eq 1 ] && grep -Eq '(Operation not supported|Function not implemented)' "$2/emmc-discard.log"; }; then
+            echo '提示：设备不支持 blkdiscard，将回退到整盘写零方式。'
+            return 2
+        fi
+        printf '❌ 错误：blkdiscard 清除失败（退出码 %s），停止清理，不自动改用写零。\n' "$discard_status" >&2
+        return 1
+    )
+}
+
 erase_inactive_emmc() {
-    local boot info blocks tail_sectors cmd
-    confirm_media_write '整盘覆盖清空 eMMC' || return 1
+    local boot info blocks tail_sectors cmd discard_status=0
+    confirm_media_write '整盘清空 eMMC（优先快速清除，不支持时写零）' || return 1
     boot=$(get_media_boot_disk) || return 1
     info=$(get_mmc_info "$boot") || return 1
     [[ "$info" == SD\ * ]] || { echo '❌ 错误：必须先从 SD 卡启动，才能清空 eMMC。' >&2; return 1; }
@@ -928,18 +972,26 @@ erase_inactive_emmc() {
     for cmd in dd partx; do
         command -v "$cmd" >/dev/null 2>&1 || { echo "❌ 缺少清理工具：$cmd" >&2; return 1; }
     done
-    blocks=$((TARGET_SECTORS / 2048)); tail_sectors=$((TARGET_SECTORS % 2048))
-    echo '信息：正在用零覆盖 eMMC 用户区整盘，请保持通电，较大容量可能需要较长时间...'
-    dd if=/dev/zero of="/dev/$TARGET_DISK" bs=1M count="$blocks" conv=fsync || return 1
-    if ((tail_sectors > 0)); then
-        dd if=/dev/zero of="/dev/$TARGET_DISK" bs=512 seek="$((blocks * 2048))" count="$tail_sectors" conv=notrunc,fsync || return 1
+    prepare_emmc_discard
+    check_inactive_mmc "$TARGET_DISK" "$TARGET_CID" MMC "$TARGET_SECTORS" || return 1
+    try_emmc_discard "$TARGET_DISK" "$TMP_DIR" || discard_status=$?
+    if ((discard_status == 2)); then
+        check_inactive_mmc "$TARGET_DISK" "$TARGET_CID" MMC "$TARGET_SECTORS" || return 1
+        blocks=$((TARGET_SECTORS / 2048)); tail_sectors=$((TARGET_SECTORS % 2048))
+        echo '信息：正在用零覆盖 eMMC 用户区整盘，请保持通电，较大容量可能需要较长时间...'
+        dd if=/dev/zero of="/dev/$TARGET_DISK" bs=1M count="$blocks" conv=fsync || return 1
+        if ((tail_sectors > 0)); then
+            dd if=/dev/zero of="/dev/$TARGET_DISK" bs=512 seek="$((blocks * 2048))" count="$tail_sectors" conv=notrunc,fsync || return 1
+        fi
+    elif ((discard_status != 0)); then
+        return 1
     fi
     sync || return 1
-    partx -d - "/dev/$TARGET_DISK" || echo '警告：eMMC 数据已覆盖清空，但内核分区列表刷新失败，重启后生效。' >&2
+    partx -d - "/dev/$TARGET_DISK" || echo '警告：eMMC 数据已清空，但内核分区列表刷新失败，重启后生效。' >&2
     if [[ -n "$PENDING_EMMC_CID" ]]; then
         access_emmc_cleanup_request clear || echo '警告：eMMC 已清空，但 SD 中的清理请求标记未能删除。' >&2
     fi
-    echo '✅ 信息：eMMC 用户区整盘覆盖完成，当前 SD 卡系统继续运行。'
+    echo '✅ 信息：eMMC 用户区整盘清理完成，当前 SD 卡系统继续运行。'
 }
 
 select_install_target() {
@@ -965,7 +1017,7 @@ select_install_target() {
     ui_option 1 '升级当前启动盘（sysupgrade）' '默认，保留原有流程和选项'
     ui_option 2 "将固件整盘烧录到 $target_medium（dd）" "覆盖所选 $target_medium，不升级当前系统"
     if [[ "$boot_info" == SD\ * && "$has_emmc" == 1 ]]; then
-        ui_option 3 '整盘覆盖清空未使用的 eMMC' '清空全部分区和数据'
+        ui_option 3 '整盘清空未使用的 eMMC' '优先快速清除，不支持时整盘写零'
     fi
     ui_option q '取消操作'
     while true; do
@@ -1088,8 +1140,10 @@ set_media_disk_signature() {
 
 # RAM 中使用 POSIX sh，避免依赖原 eMMC 上的 Bash、程序或共享库。
 write_emmc_ram_worker() {
-    cat > "$TMP_DIR/emmc-erase-ram.sh" <<'EMMC_RAM_WORKER'
-#!/bin/sh
+    {
+        printf '#!/bin/sh\n'
+        declare -f try_emmc_discard
+        cat <<'EMMC_RAM_WORKER'
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 fail() { echo "❌ 错误：$*；停止清空 eMMC。" >&2; exit 1; }
 valid_disk() {
@@ -1146,11 +1200,19 @@ actual=$(sha256sum "$work/ram-sd-header") || fail 'SD 校验失败'
 [ "${actual%% *}" = "$sd_hash" ] || fail 'SD 启动扇区在交接期间发生变化'
 guard
 printf 'started\n' > "$work/emmc-ram-started" || fail '无法记录清理状态'
-echo '信息：已进入内存运行环境，正在整盘写零清空 eMMC，请保持通电...'
-blocks=$((emmc_sectors / 2048)); tail_sectors=$((emmc_sectors % 2048))
-dd if=/dev/zero of="/dev/$emmc" bs=1M count="$blocks" conv=fsync || fail 'eMMC 写零失败'
-if [ "$tail_sectors" -gt 0 ]; then
-    dd if=/dev/zero of="/dev/$emmc" bs=512 seek="$((blocks * 2048))" count="$tail_sectors" conv=notrunc,fsync || fail 'eMMC 尾部写零失败'
+echo '信息：已进入内存运行环境，准备清空 eMMC，请保持通电...'
+discard_status=0
+try_emmc_discard "$emmc" "$work" || discard_status=$?
+if [ "$discard_status" -eq 2 ]; then
+    guard
+    echo '信息：正在用零覆盖 eMMC 用户区整盘，较大容量可能需要较长时间...'
+    blocks=$((emmc_sectors / 2048)); tail_sectors=$((emmc_sectors % 2048))
+    dd if=/dev/zero of="/dev/$emmc" bs=1M count="$blocks" conv=fsync || fail 'eMMC 写零失败'
+    if [ "$tail_sectors" -gt 0 ]; then
+        dd if=/dev/zero of="/dev/$emmc" bs=512 seek="$((blocks * 2048))" count="$tail_sectors" conv=notrunc,fsync || fail 'eMMC 尾部写零失败'
+    fi
+elif [ "$discard_status" -ne 0 ]; then
+    fail 'eMMC 快速清理失败'
 fi
 sync || fail 'eMMC 同步失败'
 # 删除延后清理标记，不改动 SD 上的系统和配置备份。
@@ -1163,10 +1225,11 @@ else
     echo '警告：eMMC 已清空，但未能删除 SD 中的延后清理标记。' >&2
 fi
 printf 'complete\n' > "$work/emmc-ram-complete"
-echo '✅ 信息：eMMC 用户区整盘覆盖完成，即将重启，请等待设备从 SD 启动。'
+echo '✅ 信息：eMMC 用户区整盘清理完成，即将重启，请等待设备从 SD 启动。'
 # /sbin/upgraded（PID 1）在此程序退出后负责重启，不再次执行固件刷写。
 exit 0
 EMMC_RAM_WORKER
+    } > "$TMP_DIR/emmc-erase-ram.sh"
 }
 
 release_emmc_ramfs() {
@@ -1193,6 +1256,11 @@ prepare_emmc_ramfs() {
         install_bin /sbin/upgraded
         hashbin=$(command -v sha256sum) || exit 1
         install_bin "$hashbin"
+        discardbin=$(command -v blkdiscard 2>/dev/null) || discardbin=""
+        if [ -n "$discardbin" ]; then
+            install_bin "$discardbin"
+            [ -x "$RAM_ROOT$discardbin" ] || exit 1
+        fi
         [ -x "$RAM_ROOT/sbin/upgraded" ] && [ -x "$RAM_ROOT$hashbin" ]
     ' sh "$$:$TMP_DIR" || { release_emmc_ramfs; return 1; }
 }
@@ -1222,6 +1290,7 @@ start_emmc_ram_handoff() {
         END {if (have_total && have_free && total >= free) print total-free; else exit 1}' /proc/meminfo) || return 1
     [[ "$swap_used" =~ ^[0-9]+$ ]] || return 1
     check_available_resources "$swap_used" '内存交接（含 swap 回迁）' || return 1
+    prepare_emmc_discard
     write_emmc_ram_worker || return 1
     /bin/sh -n "$TMP_DIR/emmc-erase-ram.sh" || return 1
     dd if="/dev/$TARGET_DISK" of="$TMP_DIR/emmc-sd-header" bs=512 count=1 || return 1
@@ -1261,7 +1330,8 @@ offer_immediate_emmc_erase() {
     local answer
     [[ "$MEDIA_WRITE_VERIFIED" == 1 && "$TARGET_KIND" == SD && -n "$SOURCE_EMMC_DISK" ]] || return 0
     ui_section 'SD 烧录成功后的 eMMC 清理' "$C_B_YELLOW"
-    ui_field '清理目标' "/dev/$SOURCE_EMMC_DISK（原 eMMC 启动盘，整盘写零）"
+    ui_field '清理目标' "/dev/$SOURCE_EMMC_DISK（原 eMMC 启动盘，整盘清空）"
+    ui_field '清理方式' '优先 blkdiscard 快速清除，不支持时整盘写零。'
     ui_field '执行方式' '停止服务并切换到内存环境，解除 eMMC 占用后再清空，然后重启。'
     ui_field '注意' 'SD 尚未经过实际启动验证；清空后无法再回退到原 eMMC 系统。'
     ui_confirm N '立即进入内存环境，清空 eMMC 并重启' '不立即清空，保留 eMMC'
@@ -1605,7 +1675,7 @@ cleanup() {
         MEDIA_BOOT_MOUNTED=0
     fi
     rm -f -- "$TMP_DIR/media-config.tgz" "$TMP_DIR/media-mbr.bin" "$TMP_DIR/media-id.bin"
-    rm -f -- "$TMP_DIR/media-header.log"
+    rm -f -- "$TMP_DIR/media-header.log" "$TMP_DIR/emmc-discard.log"
     [[ ${KEEP_IMAGE:-0} == 1 ]] || rm -f -- "$TMP_DIR/media-readback.log"
     rm -f -- "$TMP_DIR/emmc-erase-ram.sh" "$TMP_DIR/emmc-sd-header" "$TMP_DIR/emmc-ram-started" "$TMP_DIR/emmc-ram-complete"
     rmdir "$TMP_DIR/media-boot" 2>/dev/null || :
