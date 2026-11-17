@@ -27,7 +27,6 @@ TMP_DIR="/tmp"                                                             # 临
 WORK_RESERVE_KIB=65536                                                    # 为升级环境和解压缓冲预留 64 MiB
 CONFIG_BACKUP_BYTES=0                                                    # 本次运行只测量一次备份大小
 KEEP_IMAGE=0                                                             # 完成压缩流检查后，取消/失败时保留镜像
-UPGRADE_MODE=compressed                                                  # compressed 或 extracted
 
 # GitHub 访问方式配置（将在用户选择后设置）
 GITHUB_PROXY=""  # GitHub 代理前缀
@@ -44,7 +43,6 @@ BOOT_MEDIUM="未识别"
 IMAGE_FILENAME_GZ=""  # 压缩固件的文件名
 CHECKSUM_FILENAME=""  # 校验和文件名
 IMAGE_PATH_GZ=""  # 压缩固件的完整路径
-IMAGE_PATH_IMG="" # 解压固件的完整路径
 IMAGE_PATH=""     # 最终交给 sysupgrade 的镜像
 CHECKSUM_PATH=""  # 校验和文件的完整路径
 
@@ -699,20 +697,6 @@ detect_boot_medium() {
     echo '信息：升级当前启动盘；SD 卡和 eMMC 均支持保留配置选项。'
 }
 
-# 按标称内存的 90% 划分档位，为硬件保留内存留余量（4G 机型可能只显示 3.77 GiB）。
-select_upgrade_mode() {
-    local total_kib="$1" nominal_gib=2
-    [[ "$USE_DOCKER" == true ]] && nominal_gib=4
-    UPGRADE_MODE=compressed
-    if [[ "$total_kib" =~ ^[1-9][0-9]{0,11}$ ]] &&
-        ((total_kib >= nominal_gib * 1024 * 1024 * 90 / 100)); then
-        UPGRADE_MODE=extracted
-        printf '信息：达到 %sG 内存档位，采用原方案：先解压为 .img，再升级。\n' "$nominal_gib"
-    else
-        printf '信息：未达到 %sG 内存档位，使用 .img.gz 流式升级，不生成完整 .img 文件。\n' "$nominal_gib"
-    fi
-}
-
 # 大小提示统一使用 KiB / MiB；内部资源计算仍使用 KiB。
 format_kib() {
     local size_kib="$1" fraction
@@ -784,47 +768,12 @@ validate_compressed_image() {
     esac
 }
 
-stream_image() {
-    local status=0
-    gunzip -c "$IMAGE_PATH_GZ" || status=$?
-    # 与原解压方案一致：允许 fwtool 尾部数据引起的警告，不忽略真正的解压错误。
-    [[ "$status" == 0 || "$status" == 2 ]]
-}
-
 prepare_upgrade_image() {
-    local image_bytes
     check_available_resources 0 '检查压缩镜像' || return 1
-    if [[ "$UPGRADE_MODE" == compressed ]]; then
-        validate_compressed_image || return 1
-        KEEP_IMAGE=1
-        IMAGE_PATH="$IMAGE_PATH_GZ"
-        echo '信息：将直接把 .img.gz 交给 sysupgrade，写入时流式解压。'
-        return 0
-    fi
-
-    # 流式计算实际解压大小并校验 CRC，不依赖会在 4 GiB 时回绕的 gzip ISIZE。
-    echo '信息：正在检查压缩流并计算解压大小，不生成临时解压镜像...'
-    image_bytes=$(set -o pipefail; stream_image | wc -c) || {
-        echo '❌ 错误：压缩固件检查失败，停止升级。' >&2
-        return 1
-    }
-    image_bytes=${image_bytes//[[:space:]]/}
-    [[ "$image_bytes" =~ ^[1-9][0-9]{0,11}$ ]] || {
-        echo '❌ 错误：解压后的镜像大小无效，停止升级。' >&2
-        return 1
-    }
+    validate_compressed_image || return 1
     KEEP_IMAGE=1
-    check_available_resources "$(((image_bytes + 1023) / 1024))" '解压固件' || return 1
-    printf '信息：正在解压固件，解压后约 %s...\n' "$(format_kib "$(((image_bytes + 1023) / 1024))")"
-    stream_image > "$IMAGE_PATH_IMG.part" || {
-        echo '❌ 错误：解压固件失败，保留压缩镜像并停止升级。' >&2
-        return 1
-    }
-    [[ -s "$IMAGE_PATH_IMG.part" ]] || return 1
-    mv -- "$IMAGE_PATH_IMG.part" "$IMAGE_PATH_IMG" || return 1
-    IMAGE_PATH="$IMAGE_PATH_IMG"
-    rm -f -- "$IMAGE_PATH_GZ"
-    echo '✅ 信息：固件解压完成，将使用 .img 升级。'
+    IMAGE_PATH="$IMAGE_PATH_GZ"
+    echo '信息：将直接把 .img.gz 交给 sysupgrade，写入时流式解压。'
 }
 
 check_upgrade_resources() {
@@ -951,7 +900,7 @@ cleanup_old_upgrade_dirs() {
 # --- 退出脚本时清理本次任务的临时文件 ---
 cleanup() {
     local file
-    for file in "${IMAGE_PATH_GZ:-}" "${IMAGE_PATH_IMG:-}" "${CHECKSUM_PATH:-}"; do
+    for file in "${IMAGE_PATH_GZ:-}" "${CHECKSUM_PATH:-}"; do
         if [[ -n "$file" ]]; then
             if [[ ${KEEP_IMAGE:-0} != 1 ||
                 ( "$file" != "${IMAGE_PATH_GZ:-}" && "$file" != "${IMAGE_PATH:-}" ) ]]; then
@@ -1019,10 +968,10 @@ echo -e "${C_BLUE}--- 步骤 2: 显示系统信息并检查内存 ---${C_RESET}"
 echo -e "${C_BLUE}信息：${C_RESET}正在收集当前系统信息..."
 echo
 
-# 总内存用于选择升级方案，实际可用内存用于后续资源检查。
+# 总内存用于信息展示，实际可用内存用于后续升级资源检查。
 echo -e "${C_CYAN}>> 内存检查:${C_RESET}"
 mem_total_kib=$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo)
-echo '信息：稍后按固件类型和内存档位选择先解压或压缩镜像升级。'
+echo '信息：标准版和 Docker 版均使用 .img.gz 压缩镜像升级，不提前生成完整 .img 文件。'
 echo
 
 # --- 显示简化内存信息 ---
@@ -1130,9 +1079,7 @@ else
 fi
 
 IMAGE_PATH_GZ="$TMP_DIR/$IMAGE_FILENAME_GZ"
-IMAGE_PATH_IMG="${IMAGE_PATH_GZ%.gz}"
 CHECKSUM_PATH="$TMP_DIR/$CHECKSUM_FILENAME"
-select_upgrade_mode "$mem_total_kib"
 
 ui_section '固件参数'
 ui_field '固件类型' "$FIRMWARE_TYPE_STR"
@@ -1269,7 +1216,7 @@ rm -f "$CHECKSUM_PATH" # 清理校验文件
 echo -e "${C_BLUE}✅ --- 步骤 8 完成 ---${C_RESET}"
 echo
 
-# --- 9. 根据内存档位准备镜像 ---
+# --- 9. 检查压缩镜像，保留原文件用于流式升级 ---
 echo -e "${C_BLUE}--- 步骤 9: 检查并准备升级镜像 ---${C_RESET}"
 prepare_upgrade_image || exit 1
 ls -lh "$IMAGE_PATH" 2>/dev/null || ls -l "$IMAGE_PATH" || true
@@ -1336,11 +1283,7 @@ ui_field '固件文件' "${IMAGE_PATH##*/}"
 ui_field '版本标签' "$RELEASE_TAG"
 ui_field '启动介质' "$BOOT_MEDIUM"
 ui_field '启动磁盘' "${BOOT_DISK:+/dev/}${BOOT_DISK:-未识别}"
-if [[ "$UPGRADE_MODE" == compressed ]]; then
-    ui_field '升级方式' '压缩镜像流式升级'
-else
-    ui_field '升级方式' '先解压镜像再升级'
-fi
+ui_field '升级方式' '压缩镜像流式升级'
 if [[ "$SYSUPGRADE_ARGS" == -n ]]; then
     ui_field '配置数据' '清除配置 (-n)'
 else
