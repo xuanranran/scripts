@@ -46,6 +46,7 @@ TARGET_KIND=""
 TARGET_MEDIUM=""
 OD_COMMAND=(od)
 MEDIA_BOOT_MOUNTED=0
+MEDIA_IMAGE_VALIDATED=0
 
 # 动态文件名（将在检测型号和Docker选择后生成）
 IMAGE_FILENAME_GZ=""  # 压缩固件的文件名
@@ -577,20 +578,32 @@ prepare_media_od() {
 
 media_od() { "${OD_COMMAND[@]}" "$@"; }
 
+# 必须按字节限制写入，并累积管道短读；不能把 count 当成 read() 次数。
+media_dd_supported() {
+    local sample
+    sample=$(set -o pipefail; printf 'dd-probe' | dd bs=4 count=5 iflag=count_bytes,fullblock 2>/dev/null) || return 1
+    [[ "$sample" == dd-pr ]]
+}
+
 # 只为介质操作准备额外依赖，只检查烧录需要的工具。
 check_media_dependencies() {
     local mode="${1:-flash}" show_result="${2:-1}" cmd package manager action
-    local -a required=(dd partx mount umount) missing=()
+    local -a required=(dd tee wc partx mount umount) missing=()
     [[ "$mode" == flash ]] || return 1
     for cmd in "${required[@]}"; do
         command -v "$cmd" >/dev/null 2>&1 && continue
         case "$cmd" in
             dd) package=coreutils-dd ;;
+            tee) package=coreutils-tee ;;
+            wc) package=coreutils-wc ;;
             partx) package=partx-utils ;;
             mount|umount) package=mount-utils ;;
         esac
         [[ " ${missing[*]} " == *" $package "* ]] || missing+=("$package")
     done
+    if ! media_dd_supported && [[ " ${missing[*]} " != *' coreutils-dd '* ]]; then
+        missing+=(coreutils-dd)
+    fi
     if [[ "$mode" == flash ]] && ! prepare_media_od; then
         missing+=(coreutils-od)
     fi
@@ -617,6 +630,10 @@ check_media_dependencies() {
         echo '❌ 错误：仍缺少兼容的 od（需要 coreutils-od），停止操作，未写盘。' >&2
         return 1
     fi
+    media_dd_supported || {
+        echo '❌ 错误：dd 不支持按字节限量写入（需要 coreutils-dd），停止操作，未写盘。' >&2
+        return 1
+    }
     [[ "$show_result" != 1 ]] || echo '✅ 信息：介质操作工具检查通过。'
     return 0
 }
@@ -908,11 +925,10 @@ validate_media_mbr() {
     done
 }
 
-# 消费完整压缩流；仅保留前 512 字节，不生成完整解压镜像。
-capture_media_image_size() {
-    local remainder
+# 与现有压缩完整性检查合并：只保留 MBR，余下数据丢弃，不统计大小。
+capture_media_header() {
     # BusyBox head 使用 stdio 缓冲，可能从管道多读但只输出 512 字节，
-    # 导致随后的 wc 少算长度。dd 按 1 字节读取 512 次，不消费后续数据。
+    # 导致后续流处理丢失缓冲数据。dd 按 1 字节读取 512 次，不消费后续数据。
     if ! dd bs=1 count=512 of="$TMP_DIR/media-mbr.bin" 2> "$TMP_DIR/media-header.log"; then
         cat "$TMP_DIR/media-header.log" >&2
         echo '❌ 错误：无法读取完整镜像头，未写盘。' >&2
@@ -921,10 +937,61 @@ capture_media_image_size() {
     [[ $(wc -c < "$TMP_DIR/media-mbr.bin") == 512 ]] || {
         echo '❌ 错误：镜像头不足 512 字节，未写盘。' >&2; return 1;
     }
-    remainder=$(wc -c) || return 1
-    remainder=${remainder//[[:space:]]/}
-    [[ "$remainder" =~ ^[0-9]{1,12}$ ]] || return 1
-    printf '%s\n' "$((remainder + 512))"
+    cat >/dev/null
+}
+
+# MBR 使用小端整数；明确解析字节，不依赖 od -tu4 的主机字节序。
+check_media_capacity() {
+    local offset values start sectors end index
+    local -a bytes=()
+    validate_media_mbr || return 1
+    [[ "$TARGET_SECTORS" =~ ^[1-9][0-9]{0,11}$ ]] || return 1
+    for offset in 454 470 486 502; do
+        values=$(media_od -An -tu1 -j "$offset" -N 8 "$TMP_DIR/media-mbr.bin") || return 1
+        read -r -a bytes <<< "$values"
+        ((${#bytes[@]} == 8)) || return 1
+        for index in "${bytes[@]}"; do
+            [[ "$index" =~ ^[0-9]{1,3}$ ]] && ((index <= 255)) || return 1
+        done
+        start=$((bytes[0] + bytes[1]*256 + bytes[2]*65536 + bytes[3]*16777216))
+        sectors=$((bytes[4] + bytes[5]*256 + bytes[6]*65536 + bytes[7]*16777216))
+        ((sectors > 0)) || continue
+        end=$((start + sectors))
+        ((end <= TARGET_SECTORS)) || {
+            echo '❌ 错误：镜像分区布局超出目标介质容量，未写盘。' >&2
+            return 1
+        }
+    done
+    echo '✅ 信息：镜像分区布局容量检查通过；写入时继续按目标容量限制范围。'
+}
+
+# 按目标用户区字节数硬性限量；继续消费溢出部分以识别超大镜像。
+write_media_bounded() {
+    local capacity=$((TARGET_SECTORS * 512)) overflow
+    dd of="/dev/$TARGET_DISK" bs=4M count="$capacity" iflag=count_bytes,fullblock conv=fsync || return 1
+    overflow=$(wc -c) || return 1
+    overflow=${overflow//[[:space:]]/}
+    [[ "$overflow" == 0 ]] || {
+        echo '❌ 错误：完整镜像超出目标介质容量，已停止写入；不执行后续操作，当前启动盘未被写入。' >&2
+        return 1
+    }
+}
+
+# 等待 tee 的计数分支；统计失败必须传递到整个写入管道。
+count_media_stream() {
+    local count_pid status=0
+    tee >(wc -c > "$TMP_DIR/media-written.bytes") || status=$?
+    count_pid=$!
+    if ! wait "$count_pid"; then
+        echo '❌ 错误：写入字节统计失败，停止后续操作。' >&2
+        status=1
+    fi
+    return "$status"
+}
+
+write_media_counted() {
+    rm -f -- "$TMP_DIR/media-written.bytes" || return 1
+    (set -o pipefail; media_image_stream | count_media_stream | write_media_bounded)
 }
 
 verify_media_readback() {
@@ -987,13 +1054,10 @@ write_media_image() {
     fi
     check_media_dependencies flash 0 || return 1
     check_inactive_mmc "$TARGET_DISK" "$TARGET_CID" "$TARGET_KIND" "$TARGET_SECTORS" || return 1
-    echo '信息：正在计算完整镜像大小并检查目标容量，不生成完整解压镜像...'
-    image_bytes=$(set -o pipefail; media_image_stream | capture_media_image_size) || return 1
-    image_bytes=${image_bytes//[[:space:]]/}
-    [[ "$image_bytes" =~ ^[1-9][0-9]{0,11}$ ]] && ((image_bytes % 512 == 0 && image_bytes <= TARGET_SECTORS * 512)) || {
-        echo '❌ 错误：镜像大小无效或目标介质容量不足，未写盘。' >&2; return 1;
-    }
-    validate_media_mbr || { echo '❌ 错误：烧录镜像的分区表不受支持，未写盘。' >&2; return 1; }
+    if [[ "$MEDIA_IMAGE_VALIDATED" != 1 || ! -s "$TMP_DIR/media-mbr.bin" ]]; then
+        validate_compressed_image || return 1
+    fi
+    check_media_capacity || { echo '❌ 错误：烧录镜像的分区表或目标容量不符合要求，未写盘。' >&2; return 1; }
     confirm_media_write "确认整盘烧录到 $TARGET_MEDIUM" || return 1
     check_upgrade_resources || return 1
     if [[ "$KEEP_CONFIG" == 1 ]]; then
@@ -1003,9 +1067,15 @@ write_media_image() {
     fi
     check_inactive_mmc "$TARGET_DISK" "$TARGET_CID" "$TARGET_KIND" "$TARGET_SECTORS" || return 1
     echo "信息：正在整盘写入 $TARGET_MEDIUM /dev/$TARGET_DISK，请勿移除介质或断电..."
-    (set -o pipefail; media_image_stream | dd of="/dev/$TARGET_DISK" bs=4M conv=fsync) || {
+    write_media_counted || {
         echo '❌ 错误：目标介质写入失败，当前启动盘未被写入。' >&2; return 1;
     }
+    image_bytes=$(cat "$TMP_DIR/media-written.bytes") || return 1
+    image_bytes=${image_bytes//[[:space:]]/}
+    [[ "$image_bytes" =~ ^[1-9][0-9]{0,11}$ ]] && ((image_bytes % 512 == 0 && image_bytes <= TARGET_SECTORS * 512)) || {
+        echo '❌ 错误：实际写入镜像长度无效，停止后续操作，当前启动盘未被写入。' >&2; return 1;
+    }
+    printf '✅ 信息：镜像写入完成，实际长度 %s 字节（%s）。\n' "$image_bytes" "$(format_kib "$(((image_bytes + 1023) / 1024))")"
     sync || return 1
     # 写入后读回完整镜像范围，避免仅凭 dd 退出码就提示烧录成功。
     echo "信息：正在读回 $TARGET_MEDIUM 并校验完整镜像，请稍候..."
@@ -1097,15 +1167,22 @@ check_download_resources() {
 }
 
 validate_compressed_image() {
-    local status=0
+    local -a statuses=()
+    MEDIA_IMAGE_VALIDATED=0
     [[ -s "$IMAGE_PATH_GZ" ]] || { echo '❌ 错误：压缩固件不存在或为空。' >&2; return 1; }
-    # 只检查压缩流和 CRC，不生成 .img；保留尾部的 fwtool 元数据。
-    gunzip -t "$IMAGE_PATH_GZ" || status=$?
-    case "$status" in
+    # 仍完成原有 CRC 检查，同时保留 512 字节头；不另读一遍完整流统计长度。
+    if gunzip -c "$IMAGE_PATH_GZ" | capture_media_header; then
+        statuses=("${PIPESTATUS[@]}")
+    else
+        statuses=("${PIPESTATUS[@]}")
+    fi
+    [[ "${statuses[1]}" == 0 ]] || return 1
+    case "${statuses[0]}" in
         0) echo '✅ 信息：压缩镜像完整性检查通过。' ;;
         2) echo '✅ 信息：压缩流检查完成，检测到固件尾部附加数据；继续检查镜像分区表。' ;;
-        *) printf '❌ 错误：压缩固件检查失败（退出码 %s），停止烧录。\n' "$status" >&2; return 1 ;;
+        *) printf '❌ 错误：压缩固件检查失败（退出码 %s），停止烧录。\n' "${statuses[0]}" >&2; return 1 ;;
     esac
+    MEDIA_IMAGE_VALIDATED=1
 }
 
 stream_image() {
@@ -1217,7 +1294,7 @@ cleanup() {
         MEDIA_BOOT_MOUNTED=0
     fi
     rm -f -- "$TMP_DIR/media-config.tgz" "$TMP_DIR/media-mbr.bin" "$TMP_DIR/media-id.bin"
-    rm -f -- "$TMP_DIR/media-header.log"
+    rm -f -- "$TMP_DIR/media-header.log" "$TMP_DIR/media-written.bytes"
     [[ ${KEEP_IMAGE:-0} == 1 ]] || rm -f -- "$TMP_DIR/media-readback.log"
     rmdir "$TMP_DIR/media-boot" 2>/dev/null || :
     for file in "${IMAGE_PATH_GZ:-}" "${IMAGE_PATH_IMG:-}" "${CHECKSUM_PATH:-}"; do
